@@ -1,0 +1,17 @@
+seed: 0
+device: auto
+
+data:
+  manifest: data/manifests/example.jsonl
+  audio_embedding_key: beat_sync
+  candidate_label_strategy: track_labels
+
+optimization:
+  batch_size: 1
+  max_epochs: 50
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+
+loss:
+  name: frame_label_cross_entropy
+  segment_balance: false

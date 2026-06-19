@@ -1,0 +1,9 @@
+output_root: data/embeddings/text
+
+text_encoder:
+  name: sentence_transformers
+  checkpoint: intfloat/e5-base-v2
+
+prompt:
+  template: "{label}"
+  normalize_whitespace: true

@@ -1,0 +1,16 @@
+dataset_manifest: data/manifests/example.jsonl
+output_root: data/embeddings/audio
+
+audio_encoder:
+  name: placeholder
+  checkpoint: null
+  layer: null
+
+beat_tracker:
+  name: placeholder
+  estimate_downbeats: true
+
+pooling:
+  method: mean
+  keep_dense: true
+  final_interval: track_duration
