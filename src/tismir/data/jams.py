@@ -56,3 +56,14 @@ def unique_labels(sections: Iterable[Section]) -> list[str]:
             labels.append(section.label)
             seen.add(section.label)
     return labels
+
+
+def sections_to_intervals_labels(sections: Iterable[Section]):
+    """Convert sections to mir_eval-style intervals and labels."""
+
+    import numpy as np
+
+    sections = list(sections)
+    intervals = np.asarray([(section.start, section.end) for section in sections], dtype=float)
+    labels = [section.label for section in sections]
+    return intervals, labels

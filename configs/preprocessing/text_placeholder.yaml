@@ -1,0 +1,10 @@
+output_root: data/embeddings/text
+scope: dataset
+
+text_encoder:
+  name: placeholder
+  output_dim: 16
+
+prompt:
+  template: "{label}"
+  normalize_whitespace: true

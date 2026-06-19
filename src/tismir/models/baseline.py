@@ -10,10 +10,12 @@ def require_torch():
     return torch, nn
 
 
+torch, nn = require_torch()
+
+
 def build_mlp(input_dim: int, hidden_dim: int, output_dim: int):
     """Build a small projection MLP."""
 
-    _, nn = require_torch()
     return nn.Sequential(
         nn.Linear(input_dim, hidden_dim),
         nn.GELU(),
@@ -21,25 +23,40 @@ def build_mlp(input_dim: int, hidden_dim: int, output_dim: int):
     )
 
 
-class ProjectionBaseline:
-    """Lazy wrapper for the initial open-vocabulary projection model.
+class ProjectionBaseline(nn.Module):
+    """Open-vocabulary frame-label projection baseline."""
 
-    The full torch module will be expanded once training code lands; this class
-    keeps the intended public API visible without making torch a hard dependency.
-    """
+    def __init__(
+        self,
+        audio_dim: int,
+        text_dim: int,
+        audio_hidden_dim: int = 256,
+        text_hidden_dim: int = 256,
+        output_dim: int = 128,
+        temperature: float = 0.07,
+        normalize: bool = True,
+    ) -> None:
+        super().__init__()
+        if temperature <= 0:
+            raise ValueError("temperature must be positive")
+        self.audio_projection = build_mlp(audio_dim, audio_hidden_dim, output_dim)
+        self.text_projection = build_mlp(text_dim, text_hidden_dim, output_dim)
+        self.temperature = temperature
+        self.normalize = normalize
 
-    def __init__(self, audio_dim: int, text_dim: int, hidden_dim: int = 256, output_dim: int = 128):
-        torch, nn = require_torch()
+    def forward(self, audio, text, audio_mask=None):
+        """Return frame-label logits."""
 
-        class _Module(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.audio_projection = build_mlp(audio_dim, hidden_dim, output_dim)
-                self.text_projection = build_mlp(text_dim, hidden_dim, output_dim)
+        audio_z = self.audio_projection(audio)
+        text_z = self.text_projection(text)
+        if self.normalize:
+            audio_z = torch.nn.functional.normalize(audio_z, dim=-1)
+            text_z = torch.nn.functional.normalize(text_z, dim=-1)
 
-            def forward(self, audio, text):
-                audio_z = torch.nn.functional.normalize(self.audio_projection(audio), dim=-1)
-                text_z = torch.nn.functional.normalize(self.text_projection(text), dim=-1)
-                return audio_z @ text_z.transpose(-1, -2)
-
-        self.module = _Module()
+        if text_z.ndim == 2:
+            logits = torch.einsum("btd,kd->btk", audio_z, text_z)
+        elif text_z.ndim == 3:
+            logits = torch.einsum("btd,bkd->btk", audio_z, text_z)
+        else:
+            raise ValueError("text must have shape [K, D] or [B, K, D]")
+        return logits / self.temperature

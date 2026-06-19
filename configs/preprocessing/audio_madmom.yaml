@@ -1,0 +1,21 @@
+dataset_manifest: data/manifests/example.jsonl
+output_root: data/embeddings/audio
+
+audio_encoder:
+  name: placeholder
+  output_dim: 16
+  frame_rate: 2.0
+
+beat_tracker:
+  name: madmom
+  estimate_downbeats: true
+  fps: 100
+  min_bpm: 55.0
+  max_bpm: 215.0
+  beats_per_bar: [3, 4]
+
+pooling:
+  method: mean
+  empty: nearest
+  keep_dense: true
+  final_interval: track_duration

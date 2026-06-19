@@ -1,0 +1,20 @@
+dataset_manifest: data/manifests/example.jsonl
+output_root: data/embeddings/audio
+
+audio_encoder:
+  name: placeholder
+  output_dim: 16
+  frame_rate: 2.0
+
+beat_tracker:
+  name: beat_this
+  checkpoint_path: final0
+  device: cpu
+  dbn: false
+  float16: false
+
+pooling:
+  method: mean
+  empty: nearest
+  keep_dense: true
+  final_interval: track_duration

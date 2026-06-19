@@ -1,16 +1,38 @@
 seed: 0
 device: auto
+output_dir: outputs/train/baseline
+
+model:
+  name: projection_baseline
+  audio:
+    input_dim: null
+    hidden_dim: 256
+    output_dim: 128
+  text:
+    input_dim: null
+    hidden_dim: 256
+    output_dim: 128
+  similarity:
+    temperature: 0.07
+    normalize: true
 
 data:
   manifest: data/manifests/example.jsonl
+  audio_embedding_root: data/embeddings/audio
+  audio_encoder: placeholder
+  text_embedding_root: data/embeddings/text
+  text_encoder: sentence_transformers
   audio_embedding_key: beat_sync
-  candidate_label_strategy: track_labels
+  namespace: segment_open
+  candidate_label_strategy: dataset_labels
+  ignore_index: -100
 
 optimization:
   batch_size: 1
   max_epochs: 50
   learning_rate: 0.0001
   weight_decay: 0.00001
+  shuffle: true
 
 loss:
   name: frame_label_cross_entropy

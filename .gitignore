@@ -12,5 +12,6 @@ htmlcov/
 venv/
 data/raw/
 data/embeddings/
+data/manifests/*.local.jsonl
 outputs/
 checkpoints/
