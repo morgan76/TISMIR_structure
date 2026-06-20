@@ -1,10 +1,133 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
+from typing import Any
 
 import numpy as np
 
 from tismir.data.schemas import Section
+
+ANNOTATION_PROCESSING_POLICIES = {
+    "keep",
+    "merge",
+    "enumerate_all_occurrences",
+    "enumerate_consecutive_repeats",
+}
+
+
+def process_sections(
+    sections: Sequence[Section],
+    annotation_processing: str | dict[str, Any] | None = None,
+) -> list[Section]:
+    """Apply optional section-label processing without modifying source JAMS."""
+
+    config = _annotation_processing_config(annotation_processing)
+    policy = config["policy"]
+    sections = list(sections)
+    if policy == "keep":
+        return sections
+    if policy == "merge":
+        return merge_consecutive_same_label_sections(sections)
+    if policy == "enumerate_all_occurrences":
+        return enumerate_section_occurrences(
+            sections,
+            labels_to_enumerate=_repeated_labels(sections),
+            start_index=config["start_index"],
+            separator=config["separator"],
+        )
+    if policy == "enumerate_consecutive_repeats":
+        return enumerate_section_occurrences(
+            sections,
+            labels_to_enumerate=_consecutively_repeated_labels(sections),
+            start_index=config["start_index"],
+            separator=config["separator"],
+        )
+    raise ValueError(f"Unknown annotation processing policy: {policy}")
+
+
+def merge_consecutive_same_label_sections(sections: Sequence[Section]) -> list[Section]:
+    """Merge adjacent sections when their labels are identical."""
+
+    merged: list[Section] = []
+    for section in sections:
+        if merged and merged[-1].label == section.label:
+            previous = merged[-1]
+            merged[-1] = replace(
+                previous,
+                end=section.end,
+                confidence=_merge_confidence(previous.confidence, section.confidence),
+            )
+        else:
+            merged.append(section)
+    return merged
+
+
+def enumerate_section_occurrences(
+    sections: Sequence[Section],
+    labels_to_enumerate: set[str],
+    start_index: int = 1,
+    separator: str = " ",
+) -> list[Section]:
+    """Append chronological occurrence numbers to selected labels."""
+
+    if start_index < 0:
+        raise ValueError("annotation_processing.start_index must be non-negative")
+    counts: dict[str, int] = {}
+    processed: list[Section] = []
+    for section in sections:
+        if section.label not in labels_to_enumerate:
+            processed.append(section)
+            continue
+        occurrence = counts.get(section.label, 0) + start_index
+        counts[section.label] = counts.get(section.label, 0) + 1
+        processed.append(replace(section, label=f"{section.label}{separator}{occurrence}"))
+    return processed
+
+
+def _annotation_processing_config(value: str | dict[str, Any] | None) -> dict[str, Any]:
+    if value in (None, False):
+        value = "keep"
+    if isinstance(value, str):
+        value = {"policy": value}
+    if not isinstance(value, dict):
+        raise TypeError("annotation_processing must be a string, mapping, or null")
+    policy = str(value.get("policy", value.get("consecutive_same_label", "keep")))
+    if policy not in ANNOTATION_PROCESSING_POLICIES:
+        raise ValueError(
+            "annotation_processing.policy must be one of: "
+            + ", ".join(sorted(ANNOTATION_PROCESSING_POLICIES))
+        )
+    return {
+        "policy": policy,
+        "separator": str(value.get("separator", " ")),
+        "start_index": int(value.get("start_index", 1)),
+    }
+
+
+def _repeated_labels(sections: Sequence[Section]) -> set[str]:
+    counts: dict[str, int] = {}
+    for section in sections:
+        counts[section.label] = counts.get(section.label, 0) + 1
+    return {label for label, count in counts.items() if count > 1}
+
+
+def _consecutively_repeated_labels(sections: Sequence[Section]) -> set[str]:
+    repeated: set[str] = set()
+    previous_label = None
+    for section in sections:
+        if section.label == previous_label:
+            repeated.add(section.label)
+        previous_label = section.label
+    return repeated
+
+
+def _merge_confidence(left: float | None, right: float | None) -> float | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return 0.5 * (left + right)
 
 
 def assign_intervals_to_grid(

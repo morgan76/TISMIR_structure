@@ -15,6 +15,16 @@ def main() -> None:
     parser.add_argument("--output-root", default=None)
     parser.add_argument("--namespace", default="segment_open")
     parser.add_argument("--scope", choices=["dataset", "track"], default=None)
+    parser.add_argument(
+        "--annotation-policy",
+        choices=[
+            "keep",
+            "merge",
+            "enumerate_all_occurrences",
+            "enumerate_consecutive_repeats",
+        ],
+        default=None,
+    )
     args = parser.parse_args()
 
     config = load_yaml(args.config)
@@ -22,6 +32,12 @@ def main() -> None:
     text_config = dict(config.get("text_encoder", {}))
     text_name = text_config.pop("name")
     tracks = load_manifest(args.manifest)
+    annotation_processing = config.get("annotation_processing")
+    if args.annotation_policy is not None:
+        annotation_processing = {
+            **({} if annotation_processing is None or isinstance(annotation_processing, str) else dict(annotation_processing)),
+            "policy": args.annotation_policy,
+        }
 
     results = preprocess_dataset_text(
         tracks=tracks,
@@ -30,6 +46,7 @@ def main() -> None:
         text_encoder_params=text_config,
         prompt=config.get("prompt", {}),
         label_normalization=config.get("label_normalization", {}),
+        annotation_processing=annotation_processing,
         namespace=args.namespace,
         scope=args.scope or config.get("scope", "dataset"),
     )

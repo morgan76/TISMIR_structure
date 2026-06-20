@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from tismir.data.annotations import assign_intervals_to_adjusted_timeline
+from tismir.data.annotations import assign_intervals_to_adjusted_timeline, process_sections
 from tismir.data.jams import load_structure_sections, unique_labels
 from tismir.data.manifest import load_manifest
 from tismir.data.schemas import Track
@@ -39,6 +39,7 @@ class StructureEmbeddingDataset:
         namespace: str = "segment_open",
         candidate_label_strategy: str = "dataset_labels",
         ignore_index: int = -100,
+        annotation_processing: str | dict[str, Any] | None = None,
     ) -> None:
         if candidate_label_strategy not in {"dataset_labels", "track_labels"}:
             raise ValueError("candidate_label_strategy must be one of: dataset_labels, track_labels")
@@ -51,6 +52,7 @@ class StructureEmbeddingDataset:
         self.namespace = namespace
         self.candidate_label_strategy = candidate_label_strategy
         self.ignore_index = ignore_index
+        self.annotation_processing = annotation_processing
 
     def __len__(self) -> int:
         return len(self.tracks)
@@ -67,6 +69,7 @@ class StructureEmbeddingDataset:
             namespace=self.namespace,
             candidate_label_strategy=self.candidate_label_strategy,
             ignore_index=self.ignore_index,
+            annotation_processing=self.annotation_processing,
         )
 
 
@@ -80,6 +83,7 @@ def load_training_example(
     namespace: str = "segment_open",
     candidate_label_strategy: str = "dataset_labels",
     ignore_index: int = -100,
+    annotation_processing: str | dict[str, Any] | None = None,
 ) -> TrainingExample:
     """Load one training example from precomputed embeddings and JAMS."""
 
@@ -99,6 +103,7 @@ def load_training_example(
         raise ValueError(f"Label/text embedding mismatch in {text_dir}")
 
     sections = load_structure_sections(track.jams_path, namespace=namespace)
+    sections = process_sections(sections, annotation_processing=annotation_processing)
     labels, text = _select_candidate_labels(
         sections=sections,
         dataset_labels=dataset_labels,

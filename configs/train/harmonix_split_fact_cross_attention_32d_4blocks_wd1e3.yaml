@@ -1,0 +1,63 @@
+seed: 0
+device: auto
+output_dir: outputs/train/harmonix_split_fact_cross_attention_32d_4blocks_wd1e3
+
+model:
+  name: temporal_text_adapter
+  audio:
+    input_dim: null
+    hidden_dim: 64
+    positional_encoding:
+      type: sinusoidal
+    num_layers: 2
+  text:
+    input_dim: null
+    hidden_dim: 64
+    num_layers: 1
+  adapter:
+    model_dim: 32
+    num_heads: 4
+    feedforward_dim: 128
+    dropout: 0.1
+  cross_attention:
+    enabled: true
+    bidirectional: true
+    num_layers: 4
+    num_heads: 1
+  similarity:
+    temperature: 0.07
+    normalize: true
+
+data:
+  manifest: data/manifests/harmonix_train.local.jsonl
+  audio_embedding_root: data/embeddings/audio
+  audio_encoder: mert
+  text_embedding_root: data/embeddings/text
+  text_encoder: sentence_transformers
+  audio_embedding_key: beat_sync
+  namespace: segment_open
+  candidate_label_strategy: track_labels
+  ignore_index: -100
+
+validation:
+  manifest: data/manifests/harmonix_val.local.jsonl
+
+optimization:
+  batch_size: 1
+  max_epochs: 200
+  learning_rate: 0.0001
+  weight_decay: 0.001
+  shuffle: true
+  lr_scheduler:
+    name: reduce_on_plateau
+    patience: 2
+    factor: 0.5
+    min_lr: 0.000001
+    threshold: 0.0
+  early_stopping:
+    patience: 12
+    min_delta: 0.0
+
+loss:
+  name: frame_label_cross_entropy
+  segment_balance: false

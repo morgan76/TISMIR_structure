@@ -7,7 +7,12 @@ from typing import Any
 
 import numpy as np
 
-from tismir.losses import frame_label_cross_entropy
+from tismir.losses import (
+    audio_audio_supervised_contrastive,
+    audio_to_text_infonce,
+    frame_label_cross_entropy,
+    text_to_audio_infonce,
+)
 from tismir.models import build_model
 from tismir.training.data import StructureEmbeddingDataset, collate_training_examples
 
@@ -50,6 +55,7 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("optimization.gradient_accumulation_steps must be positive")
     max_epochs = int(opt_config.get("max_epochs", 1))
     ignore_index = int(config.get("data", {}).get("ignore_index", -100))
+    loss_config = _loss_config(config.get("loss", {}))
     early_stopping = _early_stopping_config(opt_config.get("early_stopping"))
     history: list[dict[str, float]] = []
     best_val_loss: float | None = None
@@ -65,6 +71,7 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
 
         epoch_loss = 0.0
         epoch_items = 0
+        epoch_component_sums: dict[str, float] = {}
         optimizer_steps = 0
         model.train()
         microbatch_starts = list(range(0, len(indices), batch_size))
@@ -78,8 +85,15 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
             targets = batch["targets"].to(device)
             mask = batch["mask"].to(device)
 
-            logits = model(audio, text, audio_mask=mask)
-            loss = frame_label_cross_entropy(logits, targets, ignore_index=ignore_index)
+            loss, loss_components = _compute_loss(
+                model=model,
+                audio=audio,
+                text=text,
+                targets=targets,
+                mask=mask,
+                ignore_index=ignore_index,
+                loss_config=loss_config,
+            )
             loss_for_backward = loss / _accumulation_group_size(
                 microbatch_index=microbatch_index,
                 num_microbatches=len(microbatch_starts),
@@ -96,6 +110,10 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
                 optimizer_steps += 1
 
             epoch_loss += float(loss.detach().cpu()) * len(examples)
+            for name, value in loss_components.items():
+                epoch_component_sums[name] = (
+                    epoch_component_sums.get(name, 0.0) + float(value.detach().cpu()) * len(examples)
+                )
             epoch_items += len(examples)
 
         mean_loss = epoch_loss / max(epoch_items, 1)
@@ -105,17 +123,23 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
             "learning_rate": _current_lr(optimizer),
             "optimizer_steps": float(optimizer_steps),
         }
+        for name, total in sorted(epoch_component_sums.items()):
+            record[f"loss_{name}"] = total / max(epoch_items, 1)
         message = f"epoch={epoch + 1}/{max_epochs} loss={mean_loss:.6f}"
         if validation_dataset is not None:
-            val_loss = _evaluate_loss(
+            val_loss, val_components = _evaluate_loss(
                 model=model,
                 dataset=validation_dataset,
                 batch_size=batch_size,
                 device=device,
                 ignore_index=ignore_index,
+                loss_config=loss_config,
             )
             record["val_loss"] = val_loss
             message += f" val_loss={val_loss:.6f}"
+            for name, value in sorted(val_components.items()):
+                record[f"val_loss_{name}"] = value
+                message += f" val_{name}={value:.6f}"
             if best_val_loss is None or val_loss < best_val_loss - early_stopping["min_delta"]:
                 best_val_loss = val_loss
                 best_epoch = epoch
@@ -177,6 +201,7 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
         "stop_reason": stop_reason,
         "final_learning_rate": history[-1].get("learning_rate") if history else None,
         "gradient_accumulation_steps": gradient_accumulation_steps,
+        "loss_config": loss_config,
         "history": history,
     }
     with (output_dir / "metrics.json").open("w", encoding="utf-8") as handle:
@@ -293,11 +318,13 @@ def _evaluate_loss(
     batch_size: int,
     device,
     ignore_index: int,
-) -> float:
+    loss_config: dict[str, Any],
+) -> tuple[float, dict[str, float]]:
     torch = _require_torch()
     model.eval()
     total_loss = 0.0
     total_items = 0
+    component_sums: dict[str, float] = {}
     with torch.inference_mode():
         for start in range(0, len(dataset), batch_size):
             examples = [dataset[index] for index in range(start, min(start + batch_size, len(dataset)))]
@@ -306,12 +333,132 @@ def _evaluate_loss(
             text = batch["text"].to(device)
             targets = batch["targets"].to(device)
             mask = batch["mask"].to(device)
-            logits = model(audio, text, audio_mask=mask)
-            loss = frame_label_cross_entropy(logits, targets, ignore_index=ignore_index)
+            loss, components = _compute_loss(
+                model=model,
+                audio=audio,
+                text=text,
+                targets=targets,
+                mask=mask,
+                ignore_index=ignore_index,
+                loss_config=loss_config,
+            )
             total_loss += float(loss.detach().cpu()) * len(examples)
+            for name, value in components.items():
+                component_sums[name] = (
+                    component_sums.get(name, 0.0) + float(value.detach().cpu()) * len(examples)
+                )
             total_items += len(examples)
     model.train()
-    return total_loss / max(total_items, 1)
+    return (
+        total_loss / max(total_items, 1),
+        {
+            name: total / max(total_items, 1)
+            for name, total in sorted(component_sums.items())
+        },
+    )
+
+
+def _compute_loss(
+    model,
+    audio,
+    text,
+    targets,
+    mask,
+    ignore_index: int,
+    loss_config: dict[str, Any],
+):
+    needs_features = _has_auxiliary_losses(loss_config)
+    if needs_features:
+        if not hasattr(model, "extract_features"):
+            raise ValueError("Auxiliary contrastive losses require a model with extract_features()")
+        features = model.extract_features(audio, text, audio_mask=mask)
+        logits = features["logits"]
+    else:
+        features = None
+        logits = model(audio, text, audio_mask=mask)
+
+    components = {}
+    weighted_terms = []
+
+    frame_label_weight = float(loss_config["frame_label_weight"])
+    if frame_label_weight:
+        frame_loss = frame_label_cross_entropy(logits, targets, ignore_index=ignore_index)
+        components["frame_label"] = frame_loss.detach()
+        weighted_terms.append(frame_label_weight * frame_loss)
+
+    audio_to_text_config = loss_config["audio_to_text"]
+    if audio_to_text_config["weight"]:
+        a2t_logits = logits
+        if features is not None and audio_to_text_config["temperature"] is not None:
+            a2t_logits = features["similarity"] / float(audio_to_text_config["temperature"])
+        a2t_loss = audio_to_text_infonce(a2t_logits, targets, ignore_index=ignore_index)
+        components["audio_to_text"] = a2t_loss.detach()
+        weighted_terms.append(float(audio_to_text_config["weight"]) * a2t_loss)
+
+    text_to_audio_config = loss_config["text_to_audio"]
+    if text_to_audio_config["weight"]:
+        t2a_loss = text_to_audio_infonce(
+            features["audio_tokens"],
+            features["text_tokens"],
+            targets,
+            temperature=float(text_to_audio_config["temperature"]),
+            ignore_index=ignore_index,
+        )
+        components["text_to_audio"] = t2a_loss.detach()
+        weighted_terms.append(float(text_to_audio_config["weight"]) * t2a_loss)
+
+    audio_to_audio_config = loss_config["audio_to_audio"]
+    if audio_to_audio_config["weight"]:
+        a2a_loss = audio_audio_supervised_contrastive(
+            features["audio_tokens"],
+            targets,
+            temperature=float(audio_to_audio_config["temperature"]),
+            ignore_index=ignore_index,
+        )
+        components["audio_to_audio"] = a2a_loss.detach()
+        weighted_terms.append(float(audio_to_audio_config["weight"]) * a2a_loss)
+
+    if not weighted_terms:
+        raise ValueError("At least one loss weight must be non-zero")
+    return sum(weighted_terms), components
+
+
+def _loss_config(value: Any) -> dict[str, Any]:
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise TypeError("loss must be a mapping or null")
+
+    return {
+        "name": str(value.get("name", "frame_label_cross_entropy")),
+        "frame_label_weight": float(value.get("frame_label_weight", value.get("weight", 1.0))),
+        "audio_to_text": _contrastive_term_config(value.get("audio_to_text"), default_weight=0.0),
+        "text_to_audio": _contrastive_term_config(value.get("text_to_audio"), default_weight=0.0),
+        "audio_to_audio": _contrastive_term_config(value.get("audio_to_audio"), default_weight=0.0),
+    }
+
+
+def _contrastive_term_config(value: Any, default_weight: float) -> dict[str, float | None]:
+    if value in (None, False):
+        value = {"weight": 0.0}
+    elif value is True:
+        value = {"weight": default_weight}
+    elif isinstance(value, (int, float)):
+        value = {"weight": float(value)}
+    elif not isinstance(value, dict):
+        raise TypeError("contrastive loss term config must be a mapping, number, boolean, or null")
+    temperature = value.get("temperature", 0.07)
+    return {
+        "weight": float(value.get("weight", default_weight)),
+        "temperature": None if temperature is None else float(temperature),
+    }
+
+
+def _has_auxiliary_losses(loss_config: dict[str, Any]) -> bool:
+    return any(
+        float(loss_config[name]["weight"]) != 0.0
+        for name in ("audio_to_text", "text_to_audio", "audio_to_audio")
+    )
 
 
 def _resolve_device(device: str, torch):

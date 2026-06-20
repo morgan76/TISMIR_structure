@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from tismir.data.annotations import process_sections
 from tismir.data.jams import load_structure_sections
 from tismir.data.schemas import Section, Track
 
@@ -38,7 +39,11 @@ class DatasetSummary:
         return data
 
 
-def validate_track(track: Track, namespace: str = "segment_open") -> TrackValidationResult:
+def validate_track(
+    track: Track,
+    namespace: str = "segment_open",
+    annotation_processing: str | dict | None = None,
+) -> TrackValidationResult:
     """Validate a track record and its JAMS section annotation."""
 
     errors: list[str] = []
@@ -58,6 +63,7 @@ def validate_track(track: Track, namespace: str = "segment_open") -> TrackValida
     sections: list[Section] = []
     try:
         sections = load_structure_sections(track.jams_path, namespace=namespace)
+        sections = process_sections(sections, annotation_processing=annotation_processing)
     except Exception as exc:  # pragma: no cover - specific exception types vary by JAMS
         errors.append(f"Could not load JAMS sections: {exc}")
 

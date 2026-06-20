@@ -8,6 +8,7 @@ import re
 
 import numpy as np
 
+from tismir.data.annotations import process_sections
 from tismir.data.jams import load_structure_sections, unique_labels
 from tismir.data.schemas import Track
 from tismir.encoders.text import text_encoders
@@ -30,6 +31,7 @@ def preprocess_dataset_text(
     text_encoder_params: dict[str, Any] | None,
     prompt: dict[str, Any] | None = None,
     label_normalization: dict[str, Any] | None = None,
+    annotation_processing: str | dict[str, Any] | None = None,
     namespace: str = "segment_open",
     scope: str = "dataset",
 ) -> list[TextPreprocessingResult]:
@@ -45,22 +47,23 @@ def preprocess_dataset_text(
     if scope == "track":
         return [
             _encode_label_set(
-                labels=_track_labels(track, namespace),
+                labels=_track_labels(track, namespace, annotation_processing),
                 dataset=track.dataset,
                 output_dir=Path(output_root) / text_encoder_name / track.dataset / track.track_id,
                 encoder=encoder,
                 encoder_name=text_encoder_name,
-                prompt=prompt,
-                label_normalization=label_normalization,
-                metadata={"track_id": track.track_id, "scope": scope},
-            )
+            prompt=prompt,
+            label_normalization=label_normalization,
+            annotation_processing=annotation_processing,
+            metadata={"track_id": track.track_id, "scope": scope},
+        )
             for track in tracks
         ]
 
     labels_by_dataset: dict[str, list[str]] = {}
     for track in tracks:
         labels_by_dataset.setdefault(track.dataset, [])
-        labels_by_dataset[track.dataset].extend(_track_labels(track, namespace))
+        labels_by_dataset[track.dataset].extend(_track_labels(track, namespace, annotation_processing))
 
     results = []
     for dataset, labels in sorted(labels_by_dataset.items()):
@@ -74,6 +77,7 @@ def preprocess_dataset_text(
                 encoder_name=text_encoder_name,
                 prompt=prompt,
                 label_normalization=label_normalization,
+                annotation_processing=annotation_processing,
                 metadata={"scope": scope},
             )
         )
@@ -84,8 +88,14 @@ def result_to_dict(result: TextPreprocessingResult) -> dict[str, Any]:
     return asdict(result)
 
 
-def _track_labels(track: Track, namespace: str) -> list[str]:
-    return unique_labels(load_structure_sections(track.jams_path, namespace=namespace))
+def _track_labels(
+    track: Track,
+    namespace: str,
+    annotation_processing: str | dict[str, Any] | None,
+) -> list[str]:
+    sections = load_structure_sections(track.jams_path, namespace=namespace)
+    sections = process_sections(sections, annotation_processing=annotation_processing)
+    return unique_labels(sections)
 
 
 def _encode_label_set(
@@ -96,6 +106,7 @@ def _encode_label_set(
     encoder_name: str,
     prompt: dict[str, Any],
     label_normalization: dict[str, Any],
+    annotation_processing: str | dict[str, Any] | None,
     metadata: dict[str, Any],
 ) -> TextPreprocessingResult:
     text_labels = normalize_labels(labels, config=label_normalization)
@@ -128,6 +139,7 @@ def _encode_label_set(
             },
             "prompt": prompt,
             "label_normalization": label_normalization,
+            "annotation_processing": annotation_processing,
             "num_labels": len(labels),
             "embedding_shape": tuple(embeddings.shape),
             **metadata,

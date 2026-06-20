@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import argparse
 
-from tismir.inference import run_baseline_inference
+from tismir.diagnostics import run_diagnostics
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run baseline label-set-conditioned structure inference.")
+    parser = argparse.ArgumentParser(description="Run token-similarity diagnostics for a checkpoint.")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--audio-embedding-root", default="data/embeddings/audio")
@@ -16,7 +16,7 @@ def main() -> None:
     parser.add_argument("--text-encoder", required=True)
     parser.add_argument("--audio-embedding-key", default="beat_sync")
     parser.add_argument("--namespace", default="segment_open")
-    parser.add_argument("--output-dir", default="outputs/infer/baseline")
+    parser.add_argument("--output-dir", default="outputs/diagnostics/baseline")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
@@ -35,12 +35,11 @@ def main() -> None:
         default=None,
         help="Override checkpoint annotation_processing.policy.",
     )
-    parser.add_argument("--smoothing-window", type=int, default=1)
-    parser.add_argument("--smoothing-mode", choices=["mean", "median"], default="mean")
-    parser.add_argument("--min-segment-duration", type=float, default=0.0)
+    parser.add_argument("--max-plots", type=int, default=20)
+    parser.add_argument("--audio-audio-max-frames", type=int, default=512)
     args = parser.parse_args()
 
-    run_baseline_inference(
+    run_diagnostics(
         checkpoint_path=args.checkpoint,
         manifest=args.manifest,
         audio_embedding_root=args.audio_embedding_root,
@@ -54,9 +53,8 @@ def main() -> None:
         limit=args.limit,
         candidate_label_strategy=args.candidate_label_strategy,
         annotation_processing=None if args.annotation_policy is None else {"policy": args.annotation_policy},
-        smoothing_window=args.smoothing_window,
-        smoothing_mode=args.smoothing_mode,
-        min_segment_duration=args.min_segment_duration,
+        max_plots=args.max_plots,
+        audio_audio_max_frames=args.audio_audio_max_frames,
     )
 
 

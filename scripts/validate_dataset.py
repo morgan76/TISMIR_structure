@@ -11,11 +11,33 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Validate a dataset manifest and summarize JAMS structure labels.")
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--namespace", default="segment_open")
+    parser.add_argument(
+        "--annotation-policy",
+        choices=[
+            "keep",
+            "merge",
+            "enumerate_all_occurrences",
+            "enumerate_consecutive_repeats",
+        ],
+        default=None,
+    )
     parser.add_argument("--summary-json", default=None)
     args = parser.parse_args()
 
     tracks = load_manifest(args.manifest)
-    results = [validate_track(track, namespace=args.namespace) for track in tracks]
+    annotation_processing = (
+        None
+        if args.annotation_policy is None
+        else {"policy": args.annotation_policy}
+    )
+    results = [
+        validate_track(
+            track,
+            namespace=args.namespace,
+            annotation_processing=annotation_processing,
+        )
+        for track in tracks
+    ]
     summary = summarize_validation(results)
 
     print(format_summary(summary))

@@ -12,6 +12,16 @@ def main() -> None:
     parser.add_argument("--predictions-root", required=True, help="Root containing {dataset}/{track_id}.jams predictions.")
     parser.add_argument("--namespace", default="segment_open")
     parser.add_argument("--no-trim", action="store_true")
+    parser.add_argument(
+        "--reference-annotation-policy",
+        choices=[
+            "keep",
+            "merge",
+            "enumerate_all_occurrences",
+            "enumerate_consecutive_repeats",
+        ],
+        default=None,
+    )
     parser.add_argument("--output-json", default=None)
     args = parser.parse_args()
 
@@ -20,6 +30,11 @@ def main() -> None:
         predictions_root=args.predictions_root,
         namespace=args.namespace,
         trim=not args.no_trim,
+        reference_annotation_processing=(
+            None
+            if args.reference_annotation_policy is None
+            else {"policy": args.reference_annotation_policy}
+        ),
     )
     print(format_evaluation(evaluation))
     if args.output_json is not None:

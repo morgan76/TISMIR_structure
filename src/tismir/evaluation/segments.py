@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 
+from tismir.data.annotations import process_sections
 from tismir.data.jams import load_structure_sections, sections_to_intervals_labels
 from tismir.data.manifest import load_manifest
 
@@ -36,6 +37,7 @@ def evaluate_prediction_manifest(
     predictions_root: str | Path,
     namespace: str = "segment_open",
     trim: bool = True,
+    reference_annotation_processing: str | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate predicted JAMS files against a reference manifest."""
 
@@ -45,7 +47,13 @@ def evaluate_prediction_manifest(
         prediction_path = Path(predictions_root) / track.dataset / f"{track.track_id}.jams"
         if not prediction_path.exists():
             raise FileNotFoundError(f"Missing prediction JAMS: {prediction_path}")
-        scores = evaluate_pair(track.jams_path, prediction_path, namespace=namespace, trim=trim)
+        scores = evaluate_pair(
+            track.jams_path,
+            prediction_path,
+            namespace=namespace,
+            trim=trim,
+            reference_annotation_processing=reference_annotation_processing,
+        )
         results.append(
             TrackEvaluation(
                 track_id=track.track_id,
@@ -63,6 +71,7 @@ def evaluate_pair(
     prediction_jams: str | Path,
     namespace: str = "segment_open",
     trim: bool = True,
+    reference_annotation_processing: str | dict[str, Any] | None = None,
 ) -> dict[str, float]:
     """Evaluate one reference/prediction JAMS pair with mir_eval.segment."""
 
@@ -71,9 +80,12 @@ def evaluate_pair(
     except ImportError as exc:  # pragma: no cover - installed through JAMS
         raise ImportError("mir_eval is required for structure evaluation.") from exc
 
-    ref_intervals, ref_labels = sections_to_intervals_labels(
-        load_structure_sections(reference_jams, namespace=namespace)
+    reference_sections = load_structure_sections(reference_jams, namespace=namespace)
+    reference_sections = process_sections(
+        reference_sections,
+        annotation_processing=reference_annotation_processing,
     )
+    ref_intervals, ref_labels = sections_to_intervals_labels(reference_sections)
     est_intervals, est_labels = sections_to_intervals_labels(
         load_structure_sections(prediction_jams, namespace=namespace)
     )

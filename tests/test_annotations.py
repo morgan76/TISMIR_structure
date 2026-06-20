@@ -1,6 +1,10 @@
 import numpy as np
 
-from tismir.data.annotations import assign_intervals_to_adjusted_timeline, assign_intervals_to_grid
+from tismir.data.annotations import (
+    assign_intervals_to_adjusted_timeline,
+    assign_intervals_to_grid,
+    process_sections,
+)
 from tismir.data.schemas import Section
 
 
@@ -66,3 +70,58 @@ def test_adjusted_timeline_ignores_synthetic_boundary_without_silence_label():
     )
 
     np.testing.assert_array_equal(targets, [-100, 0, -100])
+
+
+def test_process_sections_merges_consecutive_same_labels():
+    sections = [
+        Section(start=0.0, end=1.0, label="verse"),
+        Section(start=1.0, end=2.0, label="verse"),
+        Section(start=2.0, end=3.0, label="chorus"),
+    ]
+
+    processed = process_sections(sections, {"policy": "merge"})
+
+    assert [(section.start, section.end, section.label) for section in processed] == [
+        (0.0, 2.0, "verse"),
+        (2.0, 3.0, "chorus"),
+    ]
+
+
+def test_process_sections_enumerates_all_repeated_labels():
+    sections = [
+        Section(start=0.0, end=1.0, label="verse"),
+        Section(start=1.0, end=2.0, label="chorus"),
+        Section(start=2.0, end=3.0, label="verse"),
+        Section(start=3.0, end=4.0, label="verse"),
+        Section(start=4.0, end=5.0, label="outro"),
+    ]
+
+    processed = process_sections(sections, {"policy": "enumerate_all_occurrences"})
+
+    assert [section.label for section in processed] == [
+        "verse 1",
+        "chorus",
+        "verse 2",
+        "verse 3",
+        "outro",
+    ]
+
+
+def test_process_sections_enumerates_labels_with_consecutive_repeats_only():
+    sections = [
+        Section(start=0.0, end=1.0, label="verse"),
+        Section(start=1.0, end=2.0, label="chorus"),
+        Section(start=2.0, end=3.0, label="verse"),
+        Section(start=3.0, end=4.0, label="verse"),
+        Section(start=4.0, end=5.0, label="chorus"),
+    ]
+
+    processed = process_sections(sections, {"policy": "enumerate_consecutive_repeats"})
+
+    assert [section.label for section in processed] == [
+        "verse 1",
+        "chorus",
+        "verse 2",
+        "verse 3",
+        "chorus",
+    ]

@@ -236,6 +236,49 @@ prompt:
   normalize_whitespace: true
 ```
 
+Annotation label post-processing is also configurable. This is useful when a
+dataset contains adjacent sections with the same label, such as `verse -> verse`.
+The raw JAMS files are not modified; the policy is applied while reading labels
+and targets:
+
+```yaml
+annotation_processing:
+  policy: keep
+```
+
+Supported policies:
+
+```text
+keep                           preserve annotations as-is
+merge                          merge consecutive same-label sections
+enumerate_all_occurrences       number every repeated label occurrence, e.g. verse 1, verse 2
+enumerate_consecutive_repeats   if a label repeats consecutively, number all occurrences of that label
+```
+
+The same policy must be used for text preprocessing and training data loading
+when the policy changes label names. For example:
+
+```yaml
+# configs/preprocessing/text_*.yaml
+annotation_processing:
+  policy: enumerate_consecutive_repeats
+
+# configs/train/*.yaml
+data:
+  annotation_processing:
+    policy: enumerate_consecutive_repeats
+```
+
+The command-line tools also expose overrides:
+
+```bash
+python scripts/preprocess_text.py ... --annotation-policy merge
+python scripts/infer.py ... --annotation-policy merge
+python scripts/diagnose.py ... --annotation-policy merge
+python scripts/evaluate.py ... --reference-annotation-policy merge
+python scripts/validate_dataset.py ... --annotation-policy merge
+```
+
 ## Training Data Inspection
 
 After audio and text preprocessing, inspect model-ready examples with:
