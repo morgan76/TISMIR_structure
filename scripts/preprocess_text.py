@@ -29,6 +29,7 @@ def main() -> None:
         text_encoder_name=text_name,
         text_encoder_params=text_config,
         prompt=config.get("prompt", {}),
+        label_normalization=config.get("label_normalization", {}),
         namespace=args.namespace,
         scope=args.scope or config.get("scope", "dataset"),
     )

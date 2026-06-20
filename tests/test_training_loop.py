@@ -57,15 +57,22 @@ def test_train_projection_baseline_smoke(tmp_path):
                 "text_encoder": "placeholder",
                 "audio_embedding_key": "beat_sync",
                 "namespace": "segment_open",
-                "candidate_label_strategy": "dataset_labels",
+                "candidate_label_strategy": "track_labels",
                 "ignore_index": -100,
             },
             "optimization": {
                 "batch_size": 1,
+                "gradient_accumulation_steps": 2,
                 "max_epochs": 2,
                 "learning_rate": 1e-3,
                 "weight_decay": 0.0,
                 "shuffle": False,
+                "lr_scheduler": {
+                    "name": "reduce_on_plateau",
+                    "patience": 1,
+                    "factor": 0.5,
+                    "min_lr": 1e-5,
+                },
             },
             "validation": {
                 "manifest": str(manifest_path),
@@ -79,6 +86,11 @@ def test_train_projection_baseline_smoke(tmp_path):
     assert metrics["final_loss"] is not None
     assert metrics["final_val_loss"] is not None
     assert metrics["best_val_loss"] is not None
+    assert metrics["best_epoch"] is not None
+    assert metrics["epochs_trained"] == 2
+    assert metrics["stopped_early"] is False
+    assert metrics["gradient_accumulation_steps"] == 2
+    assert metrics["history"][0]["optimizer_steps"] == 1.0
 
 
 def _write_silent_wav(path: Path, duration: float, sample_rate: int) -> None:

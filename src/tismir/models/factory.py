@@ -61,6 +61,8 @@ def _build_temporal_text_adapter(model_config: dict[str, Any], audio_dim: int, t
             if cross_config.get("num_heads") is None
             else int(cross_config["num_heads"])
         ),
+        bidirectional_cross_attention=bool(cross_config.get("bidirectional", False)),
+        cross_attention_layers=int(cross_config.get("num_layers", 1)),
         temperature=float(sim_config.get("temperature", 0.07)),
         normalize=bool(sim_config.get("normalize", True)),
     )

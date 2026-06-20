@@ -55,6 +55,53 @@ def test_temporal_text_adapter_cross_attention_logits_shape():
     assert logits.shape == (2, 6, 3)
 
 
+def test_temporal_text_adapter_bidirectional_cross_attention_logits_shape():
+    model = build_model(
+        {
+            "name": "temporal_text_adapter",
+            "audio": {"num_layers": 1},
+            "text": {"num_layers": 1},
+            "adapter": {
+                "model_dim": 8,
+                "num_heads": 2,
+                "feedforward_dim": 16,
+                "dropout": 0.0,
+            },
+            "cross_attention": {
+                "enabled": True,
+                "bidirectional": True,
+                "num_layers": 2,
+            },
+            "similarity": {"temperature": 0.1, "normalize": True},
+        },
+        audio_dim=4,
+        text_dim=5,
+    )
+    audio = torch.randn(2, 6, 4)
+    text = torch.randn(3, 5)
+
+    logits = model(audio, text)
+
+    assert logits.shape == (2, 6, 3)
+
+
+def test_temporal_text_adapter_bidirectional_requires_cross_attention():
+    try:
+        TemporalTextAdapterBaseline(
+            audio_dim=4,
+            text_dim=5,
+            model_dim=8,
+            num_heads=2,
+            feedforward_dim=16,
+            cross_attention=False,
+            bidirectional_cross_attention=True,
+        )
+    except ValueError as exc:
+        assert "requires cross_attention=True" in str(exc)
+    else:
+        raise AssertionError("Expected disabled cross-attention to fail for bidirectional mode")
+
+
 def test_temporal_text_adapter_rope_logits_shape():
     model = build_model(
         {

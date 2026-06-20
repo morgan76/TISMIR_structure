@@ -24,7 +24,12 @@ def main() -> None:
             f"targets={example.targets.shape}, labels={len(example.labels)}"
         )
 
-    batch = collate_training_examples(examples)
+    batch_examples = examples
+    if any(example.labels != examples[0].labels for example in examples):
+        print("batch: examples have different label sets; showing single-track batch")
+        batch_examples = examples[:1]
+
+    batch = collate_training_examples(batch_examples)
     print(
         f"batch: audio={tuple(batch['audio'].shape)}, text={tuple(batch['text'].shape)}, "
         f"targets={tuple(batch['targets'].shape)}, mask={tuple(batch['mask'].shape)}"

@@ -19,6 +19,11 @@ def main() -> None:
     parser.add_argument("--output-dir", default="outputs/infer/baseline")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--candidate-label-strategy",
+        choices=["track_labels", "dataset_labels"],
+        default="track_labels",
+    )
     parser.add_argument("--smoothing-window", type=int, default=1)
     parser.add_argument("--smoothing-mode", choices=["mean", "median"], default="mean")
     parser.add_argument("--min-segment-duration", type=float, default=0.0)
@@ -36,6 +41,7 @@ def main() -> None:
         output_dir=args.output_dir,
         device=args.device,
         limit=args.limit,
+        candidate_label_strategy=args.candidate_label_strategy,
         smoothing_window=args.smoothing_window,
         smoothing_mode=args.smoothing_mode,
         min_segment_duration=args.min_segment_duration,

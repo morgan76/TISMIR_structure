@@ -24,6 +24,7 @@ def run_baseline_inference(
     namespace: str = "segment_open",
     device: str = "auto",
     limit: int | None = None,
+    candidate_label_strategy: str = "track_labels",
     smoothing_window: int = 1,
     smoothing_mode: str = "mean",
     min_segment_duration: float = 0.0,
@@ -43,7 +44,7 @@ def run_baseline_inference(
         text_encoder=text_encoder,
         audio_embedding_key=audio_embedding_key,
         namespace=namespace,
-        candidate_label_strategy="dataset_labels",
+        candidate_label_strategy=candidate_label_strategy,
         ignore_index=int(config.get("data", {}).get("ignore_index", -100)),
     )
 
@@ -83,6 +84,7 @@ def run_baseline_inference(
             logits,
             decoded_logits,
             {
+                "candidate_label_strategy": candidate_label_strategy,
                 "smoothing_window": smoothing_window,
                 "smoothing_mode": smoothing_mode,
                 "min_segment_duration": min_segment_duration,

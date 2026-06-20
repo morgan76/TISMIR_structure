@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from collections import Counter
 from typing import Any
+import re
 
 import numpy as np
 
@@ -10,6 +12,7 @@ from tismir.data.jams import load_structure_sections, unique_labels
 from tismir.data.schemas import Track
 from tismir.encoders.text import text_encoders
 from tismir.io import save_array, save_json
+from tismir.preprocessing.label_normalization import normalize_labels
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,7 @@ def preprocess_dataset_text(
     text_encoder_name: str,
     text_encoder_params: dict[str, Any] | None,
     prompt: dict[str, Any] | None = None,
+    label_normalization: dict[str, Any] | None = None,
     namespace: str = "segment_open",
     scope: str = "dataset",
 ) -> list[TextPreprocessingResult]:
@@ -36,6 +40,7 @@ def preprocess_dataset_text(
 
     encoder = text_encoders.build(text_encoder_name, **(text_encoder_params or {}))
     prompt = {} if prompt is None else dict(prompt)
+    label_normalization = {} if label_normalization is None else dict(label_normalization)
 
     if scope == "track":
         return [
@@ -46,6 +51,7 @@ def preprocess_dataset_text(
                 encoder=encoder,
                 encoder_name=text_encoder_name,
                 prompt=prompt,
+                label_normalization=label_normalization,
                 metadata={"track_id": track.track_id, "scope": scope},
             )
             for track in tracks
@@ -67,6 +73,7 @@ def preprocess_dataset_text(
                 encoder=encoder,
                 encoder_name=text_encoder_name,
                 prompt=prompt,
+                label_normalization=label_normalization,
                 metadata={"scope": scope},
             )
         )
@@ -88,12 +95,26 @@ def _encode_label_set(
     encoder,
     encoder_name: str,
     prompt: dict[str, Any],
+    label_normalization: dict[str, Any],
     metadata: dict[str, Any],
 ) -> TextPreprocessingResult:
-    prompts = [_format_prompt(label, prompt) for label in labels]
+    text_labels = normalize_labels(labels, config=label_normalization)
+    prompt_labels = _prompt_labels(labels, text_labels, label_normalization)
+    prompts = [
+        _format_prompt(raw_label=raw_label, text_label=prompt_label, prompt=prompt)
+        for raw_label, prompt_label in zip(labels, prompt_labels)
+    ]
     embeddings = encoder.encode(prompts)
 
-    save_json(output_dir / "labels.json", {"labels": labels, "prompts": prompts})
+    save_json(
+        output_dir / "labels.json",
+        {
+            "labels": labels,
+            "text_labels": text_labels,
+            "prompt_labels": prompt_labels,
+            "prompts": prompts,
+        },
+    )
     save_array(output_dir / "embeddings.npy", embeddings)
     save_json(
         output_dir / "metadata.json",
@@ -106,6 +127,7 @@ def _encode_label_set(
                 "normalize_embeddings": getattr(encoder, "normalize_embeddings", None),
             },
             "prompt": prompt,
+            "label_normalization": label_normalization,
             "num_labels": len(labels),
             "embedding_shape": tuple(embeddings.shape),
             **metadata,
@@ -120,12 +142,37 @@ def _encode_label_set(
     )
 
 
-def _format_prompt(label: str, prompt: dict[str, Any]) -> str:
+def _format_prompt(raw_label: str, text_label: str, prompt: dict[str, Any]) -> str:
     template = prompt.get("template", "{label}")
-    text = template.format(label=label)
+    text = template.format(label=text_label, raw_label=raw_label, text_label=text_label)
     if prompt.get("normalize_whitespace", True):
         text = " ".join(text.split())
     return text
+
+
+def _prompt_labels(
+    raw_labels: list[str],
+    text_labels: list[str],
+    label_normalization: dict[str, Any],
+) -> list[str]:
+    if not label_normalization.get("disambiguate_duplicates", False):
+        return text_labels
+
+    counts = Counter(text_labels)
+    prompt_labels = []
+    for raw_label, text_label in zip(raw_labels, text_labels):
+        if counts[text_label] <= 1:
+            prompt_labels.append(text_label)
+            continue
+        prompt_labels.append(f"{text_label} ({_readable_raw_label(raw_label)})")
+    return prompt_labels
+
+
+def _readable_raw_label(label: str) -> str:
+    text = re.sub(r"[_\-]+", " ", label.strip().lower())
+    text = re.sub(r"(?<=[a-z])(?=\d)", " ", text)
+    text = re.sub(r"(?<=\d)(?=[a-z])", " ", text)
+    return " ".join(text.split())
 
 
 def _unique_in_order(labels: list[str]) -> list[str]:

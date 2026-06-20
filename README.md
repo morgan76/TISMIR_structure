@@ -250,9 +250,25 @@ Each example contains:
 
 ```text
 audio:   [num_beats, audio_dim]
-text:    [num_labels, text_dim]
+text:    [num_track_labels, text_dim] by default during training
 targets: [num_beats]
 mask:    [num_beats] after batching
+```
+
+Training configs use `candidate_label_strategy: track_labels`, so the text side
+only sees labels present in the current track. Dataset-level text embeddings are
+still precomputed once and then subset per track. Inference can still use a
+larger label set, such as all dataset labels or a future user-provided label set.
+
+Training uses full tracks as examples. With the default `batch_size: 1`, each
+microbatch contains one complete beat-synchronous sequence, shaped
+`[1, num_beats, audio_dim]`; no temporal cropping is applied. To simulate a
+larger optimizer batch without padding multiple long tracks together, keep
+`batch_size: 1` and set:
+
+```yaml
+optimization:
+  gradient_accumulation_steps: 4
 ```
 
 Targets are projected with a LinkSeg-style adjusted annotation timeline: section intervals are adjusted to the song duration with `mir_eval.util.adjust_intervals`, then beat-synchronous frames are assigned by timeline position. Synthetic boundary labels such as `__T_MIN` and `__T_MAX` map to a silence-like candidate label when available, otherwise they use the training `ignore_index`, defaulting to `-100`.
@@ -305,6 +321,10 @@ python scripts/infer.py \
 ```
 
 Predictions are saved as JAMS plus JSON summaries under the output directory.
+Inference defaults to `--candidate-label-strategy track_labels`, matching the
+training condition where the model only sees the current track's label set.
+Use `--candidate-label-strategy dataset_labels` to score against all
+precomputed labels for the dataset instead.
 
 ## Evaluation
 
@@ -467,11 +487,13 @@ python scripts/validate_dataset.py \
   --summary-json outputs/harmonix_summary.json
 ```
 
-Precompute dataset-level text embeddings:
+Precompute dataset-level text embeddings. Harmonix uses compact label codes, so
+this config keeps raw labels for targets while normalizing prompt text
+(`fadeout` -> `fade out`, `verseinst` -> `instrumental verse`):
 
 ```bash
 python scripts/preprocess_text.py \
-  --config configs/preprocessing/text.yaml \
+  --config configs/preprocessing/text_harmonix.yaml \
   --manifest data/manifests/harmonix.local.jsonl
 ```
 

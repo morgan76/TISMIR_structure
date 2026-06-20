@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from tismir.data.annotations import assign_intervals_to_adjusted_timeline
-from tismir.data.jams import load_structure_sections
+from tismir.data.jams import load_structure_sections, unique_labels
 from tismir.data.manifest import load_manifest
 from tismir.data.schemas import Track
 from tismir.preprocessing.beat_sync import build_beat_intervals
@@ -40,8 +40,8 @@ class StructureEmbeddingDataset:
         candidate_label_strategy: str = "dataset_labels",
         ignore_index: int = -100,
     ) -> None:
-        if candidate_label_strategy != "dataset_labels":
-            raise ValueError("Only 'dataset_labels' is currently implemented")
+        if candidate_label_strategy not in {"dataset_labels", "track_labels"}:
+            raise ValueError("candidate_label_strategy must be one of: dataset_labels, track_labels")
         self.tracks = load_manifest(manifest)
         self.audio_embedding_root = Path(audio_embedding_root)
         self.audio_encoder = audio_encoder
@@ -49,6 +49,7 @@ class StructureEmbeddingDataset:
         self.text_encoder = text_encoder
         self.audio_embedding_key = audio_embedding_key
         self.namespace = namespace
+        self.candidate_label_strategy = candidate_label_strategy
         self.ignore_index = ignore_index
 
     def __len__(self) -> int:
@@ -64,6 +65,7 @@ class StructureEmbeddingDataset:
             text_encoder=self.text_encoder,
             audio_embedding_key=self.audio_embedding_key,
             namespace=self.namespace,
+            candidate_label_strategy=self.candidate_label_strategy,
             ignore_index=self.ignore_index,
         )
 
@@ -76,6 +78,7 @@ def load_training_example(
     text_encoder: str,
     audio_embedding_key: str = "beat_sync",
     namespace: str = "segment_open",
+    candidate_label_strategy: str = "dataset_labels",
     ignore_index: int = -100,
 ) -> TrainingExample:
     """Load one training example from precomputed embeddings and JAMS."""
@@ -90,12 +93,19 @@ def load_training_example(
     beat_intervals = build_beat_intervals(beats, track_duration=duration)
 
     labels_payload = _load_json(text_dir / "labels.json")
-    labels = list(labels_payload["labels"])
-    text = np.load(text_dir / "embeddings.npy").astype(np.float32)
-    if len(labels) != len(text):
+    dataset_labels = list(labels_payload["labels"])
+    dataset_text = np.load(text_dir / "embeddings.npy").astype(np.float32)
+    if len(dataset_labels) != len(dataset_text):
         raise ValueError(f"Label/text embedding mismatch in {text_dir}")
 
     sections = load_structure_sections(track.jams_path, namespace=namespace)
+    labels, text = _select_candidate_labels(
+        sections=sections,
+        dataset_labels=dataset_labels,
+        dataset_text=dataset_text,
+        strategy=candidate_label_strategy,
+        text_dir=text_dir,
+    )
     targets = assign_intervals_to_adjusted_timeline(
         beat_intervals,
         sections,
@@ -118,6 +128,27 @@ def load_training_example(
         labels=labels,
         beat_intervals=beat_intervals,
     )
+
+
+def _select_candidate_labels(
+    sections,
+    dataset_labels: list[str],
+    dataset_text: np.ndarray,
+    strategy: str,
+    text_dir: Path,
+) -> tuple[list[str], np.ndarray]:
+    if strategy == "dataset_labels":
+        return dataset_labels, dataset_text
+    if strategy != "track_labels":
+        raise ValueError("candidate_label_strategy must be one of: dataset_labels, track_labels")
+
+    label_to_index = {label: index for index, label in enumerate(dataset_labels)}
+    labels = unique_labels(sections)
+    missing_labels = [label for label in labels if label not in label_to_index]
+    if missing_labels:
+        raise KeyError(f"Labels {missing_labels} are not in the precomputed text labels at {text_dir}")
+    indices = [label_to_index[label] for label in labels]
+    return labels, dataset_text[indices]
 
 
 def collate_training_examples(examples: list[TrainingExample]) -> dict[str, Any]:

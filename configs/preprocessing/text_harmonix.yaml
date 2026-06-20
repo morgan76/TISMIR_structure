@@ -1,0 +1,18 @@
+output_root: data/embeddings/text
+scope: dataset
+
+text_encoder:
+  name: sentence_transformers
+  checkpoint: intfloat/e5-base-v2
+  device: null
+  normalize_embeddings: true
+  batch_size: 32
+
+prompt:
+  template: "{label}"
+  normalize_whitespace: true
+
+label_normalization:
+  name: harmonix
+  normalize_whitespace: true
+  disambiguate_duplicates: true

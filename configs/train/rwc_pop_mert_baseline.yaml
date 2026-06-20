@@ -24,7 +24,7 @@ data:
   text_encoder: sentence_transformers
   audio_embedding_key: beat_sync
   namespace: segment_open
-  candidate_label_strategy: dataset_labels
+  candidate_label_strategy: track_labels
   ignore_index: -100
 
 optimization:
