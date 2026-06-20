@@ -190,6 +190,15 @@ audio_encoder:
 
 This follows the same broad pattern as the reference embedding scripts in `ax-le/msa_deep_embeddings`: each model backend owns its sampling rate and model-specific processor, returns a time sequence of embeddings, and the shared preprocessing pipeline pools those embeddings over beat intervals.
 
+For longer preprocessing runs, reuse completed outputs with:
+
+```bash
+KMP_DUPLICATE_LIB_OK=TRUE python scripts/preprocess_audio.py \
+  --config configs/preprocessing/audio_mert_beat_this.yaml \
+  --manifest data/manifests/rwc_pop.local.jsonl \
+  --skip-existing
+```
+
 ## Text Preprocessing
 
 Text preprocessing reads labels from JAMS annotations and saves label embeddings:
@@ -399,4 +408,97 @@ python scripts/evaluate.py \
   --manifest data/manifests/rwc_pop_10_val.local.jsonl \
   --predictions-root outputs/infer/rwc_pop_10_split_adapter_rope_best \
   --output-json outputs/eval/rwc_pop_10_split_adapter_rope_best.json
+```
+
+## RWC-Pop Full Split
+
+After preprocessing all 100 RWC-Pop tracks, create the full local split:
+
+```bash
+python scripts/split_manifest.py \
+  --manifest data/manifests/rwc_pop.local.jsonl \
+  --output-dir data/manifests \
+  --name rwc_pop \
+  --train-ratio 0.8 \
+  --val-ratio 0.2 \
+  --seed 0
+```
+
+Initial full-split configs compare the projection baseline against the RoPE adapter:
+
+```bash
+python scripts/train.py --config configs/train/rwc_pop_split_baseline.yaml
+python scripts/train.py --config configs/train/rwc_pop_split_adapter_rope.yaml
+```
+
+Evaluate validation-best checkpoints on the held-out split:
+
+```bash
+python scripts/infer.py \
+  --checkpoint outputs/train/rwc_pop_split_adapter_rope/best_checkpoint.pt \
+  --manifest data/manifests/rwc_pop_val.local.jsonl \
+  --audio-encoder mert \
+  --text-encoder sentence_transformers \
+  --output-dir outputs/infer/rwc_pop_split_adapter_rope_best \
+  --device cpu \
+  --smoothing-window 5 \
+  --min-segment-duration 3.0
+
+python scripts/evaluate.py \
+  --manifest data/manifests/rwc_pop_val.local.jsonl \
+  --predictions-root outputs/infer/rwc_pop_split_adapter_rope_best \
+  --output-json outputs/eval/rwc_pop_split_adapter_rope_best.json
+```
+
+## Harmonix
+
+Create and validate a local Harmonix manifest:
+
+```bash
+python scripts/create_manifest.py \
+  --audio-dir ~/Documents/Harmonix/audio \
+  --jams-dir ~/Documents/Harmonix/references \
+  --dataset harmonix \
+  --output data/manifests/harmonix.local.jsonl \
+  --absolute-paths
+
+python scripts/validate_dataset.py \
+  --manifest data/manifests/harmonix.local.jsonl \
+  --summary-json outputs/harmonix_summary.json
+```
+
+Precompute dataset-level text embeddings:
+
+```bash
+python scripts/preprocess_text.py \
+  --config configs/preprocessing/text.yaml \
+  --manifest data/manifests/harmonix.local.jsonl
+```
+
+Create a full local split:
+
+```bash
+python scripts/split_manifest.py \
+  --manifest data/manifests/harmonix.local.jsonl \
+  --output-dir data/manifests \
+  --name harmonix \
+  --train-ratio 0.8 \
+  --val-ratio 0.2 \
+  --seed 0
+```
+
+Full MERT+BeatThis preprocessing is resumable but long for Harmonix:
+
+```bash
+KMP_DUPLICATE_LIB_OK=TRUE python scripts/preprocess_audio.py \
+  --config configs/preprocessing/audio_mert_beat_this.yaml \
+  --manifest data/manifests/harmonix.local.jsonl \
+  --skip-existing
+```
+
+Once audio embeddings are available, train the initial full-split baselines:
+
+```bash
+python scripts/train.py --config configs/train/harmonix_split_baseline.yaml
+python scripts/train.py --config configs/train/harmonix_split_adapter_rope.yaml
 ```

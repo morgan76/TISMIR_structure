@@ -33,13 +33,32 @@ def preprocess_track_audio(
 ) -> AudioPreprocessingResult:
     """Precompute dense and beat-synchronous embeddings for one track."""
 
+    audio_encoder = audio_encoders.build(audio_encoder_name, **(audio_encoder_params or {}))
+    beat_tracker = beat_trackers.build(beat_tracker_name, **(beat_tracker_params or {}))
+    return preprocess_track_audio_with_backends(
+        track=track,
+        output_root=output_root,
+        audio_encoder_name=audio_encoder_name,
+        audio_encoder=audio_encoder,
+        beat_tracker=beat_tracker,
+        pooling=pooling,
+    )
+
+
+def preprocess_track_audio_with_backends(
+    track: Track,
+    output_root: str | Path,
+    audio_encoder_name: str,
+    audio_encoder,
+    beat_tracker,
+    pooling: dict[str, Any] | None = None,
+) -> AudioPreprocessingResult:
+    """Precompute one track using already-constructed encoder/tracker objects."""
+
     pooling = {} if pooling is None else dict(pooling)
     method = pooling.get("method", "mean")
     if method != "mean":
         raise ValueError(f"Unsupported pooling method: {method}")
-
-    audio_encoder = audio_encoders.build(audio_encoder_name, **(audio_encoder_params or {}))
-    beat_tracker = beat_trackers.build(beat_tracker_name, **(beat_tracker_params or {}))
 
     dense = audio_encoder.encode(track.audio_path)
     beat_result = beat_tracker.track(track.audio_path)
