@@ -85,6 +85,64 @@ def test_temporal_text_adapter_bidirectional_cross_attention_logits_shape():
     assert logits.shape == (2, 6, 3)
 
 
+def test_temporal_text_adapter_bidirectional_uses_no_temporal_convolution():
+    model = build_model(
+        {
+            "name": "temporal_text_adapter",
+            "audio": {"num_layers": 1},
+            "text": {"num_layers": 1},
+            "adapter": {
+                "model_dim": 8,
+                "num_heads": 2,
+                "feedforward_dim": 16,
+                "dropout": 0.0,
+            },
+            "cross_attention": {
+                "enabled": True,
+                "bidirectional": True,
+                "num_layers": 2,
+            },
+        },
+        audio_dim=4,
+        text_dim=5,
+    )
+
+    assert not any(isinstance(module, torch.nn.Conv1d) for module in model.modules())
+
+
+def test_temporal_text_adapter_bidirectional_rope_logits_shape():
+    model = build_model(
+        {
+            "name": "temporal_text_adapter",
+            "audio": {
+                "num_layers": 1,
+                "positional_encoding": {"type": "rope", "base": 10000.0},
+            },
+            "text": {"num_layers": 1},
+            "adapter": {
+                "model_dim": 8,
+                "num_heads": 2,
+                "feedforward_dim": 16,
+                "dropout": 0.0,
+            },
+            "cross_attention": {
+                "enabled": True,
+                "bidirectional": True,
+                "num_layers": 2,
+            },
+            "similarity": {"temperature": 0.1, "normalize": True},
+        },
+        audio_dim=4,
+        text_dim=5,
+    )
+    audio = torch.randn(2, 6, 4)
+    text = torch.randn(3, 5)
+
+    logits = model(audio, text)
+
+    assert logits.shape == (2, 6, 3)
+
+
 def test_temporal_text_adapter_bidirectional_requires_cross_attention():
     try:
         TemporalTextAdapterBaseline(

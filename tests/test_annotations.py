@@ -125,3 +125,25 @@ def test_process_sections_enumerates_labels_with_consecutive_repeats_only():
         "verse 3",
         "chorus",
     ]
+
+
+def test_process_sections_enumerates_base_occurrences():
+    sections = [
+        Section(start=0.0, end=1.0, label="verse2"),
+        Section(start=1.0, end=2.0, label="chorus"),
+        Section(start=2.0, end=3.0, label="verse 5"),
+        Section(start=3.0, end=4.0, label="verse2"),
+        Section(start=4.0, end=5.0, label="bridge1a"),
+        Section(start=5.0, end=6.0, label="bridge 2"),
+    ]
+
+    processed = process_sections(sections, {"policy": "enumerate_base_occurrences"})
+
+    assert [section.label for section in processed] == [
+        "verse 1",
+        "chorus",
+        "verse 2",
+        "verse 3",
+        "bridge 1",
+        "bridge 2",
+    ]

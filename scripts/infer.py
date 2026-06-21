@@ -30,6 +30,7 @@ def main() -> None:
             "keep",
             "merge",
             "enumerate_all_occurrences",
+            "enumerate_base_occurrences",
             "enumerate_consecutive_repeats",
         ],
         default=None,

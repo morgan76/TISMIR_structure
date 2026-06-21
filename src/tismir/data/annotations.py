@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
+import re
 from typing import Any
 
 import numpy as np
@@ -12,6 +13,7 @@ ANNOTATION_PROCESSING_POLICIES = {
     "keep",
     "merge",
     "enumerate_all_occurrences",
+    "enumerate_base_occurrences",
     "enumerate_consecutive_repeats",
 }
 
@@ -33,6 +35,13 @@ def process_sections(
         return enumerate_section_occurrences(
             sections,
             labels_to_enumerate=_repeated_labels(sections),
+            start_index=config["start_index"],
+            separator=config["separator"],
+        )
+    if policy == "enumerate_base_occurrences":
+        return enumerate_section_base_occurrences(
+            sections,
+            bases_to_enumerate=_repeated_label_bases(sections),
             start_index=config["start_index"],
             separator=config["separator"],
         )
@@ -85,6 +94,29 @@ def enumerate_section_occurrences(
     return processed
 
 
+def enumerate_section_base_occurrences(
+    sections: Sequence[Section],
+    bases_to_enumerate: set[str],
+    start_index: int = 1,
+    separator: str = " ",
+) -> list[Section]:
+    """Append chronological occurrence numbers after stripping existing markers."""
+
+    if start_index < 0:
+        raise ValueError("annotation_processing.start_index must be non-negative")
+    counts: dict[str, int] = {}
+    processed: list[Section] = []
+    for section in sections:
+        base = _label_base(section.label)
+        if base not in bases_to_enumerate:
+            processed.append(section)
+            continue
+        occurrence = counts.get(base, 0) + start_index
+        counts[base] = counts.get(base, 0) + 1
+        processed.append(replace(section, label=f"{base}{separator}{occurrence}"))
+    return processed
+
+
 def _annotation_processing_config(value: str | dict[str, Any] | None) -> dict[str, Any]:
     if value in (None, False):
         value = "keep"
@@ -112,6 +144,14 @@ def _repeated_labels(sections: Sequence[Section]) -> set[str]:
     return {label for label, count in counts.items() if count > 1}
 
 
+def _repeated_label_bases(sections: Sequence[Section]) -> set[str]:
+    counts: dict[str, int] = {}
+    for section in sections:
+        base = _label_base(section.label)
+        counts[base] = counts.get(base, 0) + 1
+    return {label for label, count in counts.items() if count > 1}
+
+
 def _consecutively_repeated_labels(sections: Sequence[Section]) -> set[str]:
     repeated: set[str] = set()
     previous_label = None
@@ -120,6 +160,14 @@ def _consecutively_repeated_labels(sections: Sequence[Section]) -> set[str]:
             repeated.add(section.label)
         previous_label = section.label
     return repeated
+
+
+def _label_base(label: str) -> str:
+    text = re.sub(r"[_\-]+", " ", label.strip().lower())
+    text = re.sub(r"(?<=[a-z])(?=\d)", " ", text)
+    text = re.sub(r"(?<=\d)(?=[a-z])", " ", text)
+    text = " ".join(text.split())
+    return re.sub(r"\s+[0-9]+(?:\s*[a-z])?$", "", text)
 
 
 def _merge_confidence(left: float | None, right: float | None) -> float | None:

@@ -82,11 +82,14 @@ class TemporalTextAdapterBaseline(nn.Module):
             raise ValueError("model_dim must be divisible by cross_attention_heads")
 
         if bidirectional_cross_attention:
-            self.audio_adapter = TemporalConvFrameBranch(
+            self.audio_adapter = _build_audio_transformer_encoder(
                 model_dim=model_dim,
-                feedforward_dim=feedforward_dim,
                 num_layers=audio_layers,
+                num_heads=num_heads,
+                feedforward_dim=feedforward_dim,
                 dropout=dropout,
+                position_type=position_type,
+                rope_base=rope_base,
             )
             self.text_adapter = TransformerIdentity()
             self.fact_input_block = FactInputBlock(
@@ -123,11 +126,14 @@ class TemporalTextAdapterBaseline(nn.Module):
                         FactUpdateBlock(
                             model_dim=model_dim,
                             cross_attention_heads=cross_heads,
+                            frame_heads=num_heads,
                             action_heads=num_heads,
                             feedforward_dim=feedforward_dim,
                             frame_layers=audio_layers,
                             action_layers=text_layers,
                             dropout=dropout,
+                            frame_position_type=position_type,
+                            rope_base=rope_base,
                         )
                         for _ in range(cross_attention_layers)
                     ]
@@ -265,17 +271,20 @@ class FactInputBlock(nn.Module):
 
 
 class FactUpdateBlock(nn.Module):
-    """FACT-style update block with frame-to-label and label-to-frame communication."""
+    """FACT-style update block with self-attention and bidirectional cross-attention."""
 
     def __init__(
         self,
         model_dim: int,
         cross_attention_heads: int,
+        frame_heads: int,
         action_heads: int,
         feedforward_dim: int,
         frame_layers: int,
         action_layers: int,
         dropout: float,
+        frame_position_type: str,
+        rope_base: float,
     ) -> None:
         super().__init__()
         self.text_from_audio = nn.MultiheadAttention(
@@ -300,11 +309,14 @@ class FactUpdateBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.text_norm = nn.LayerNorm(model_dim)
         self.audio_norm = nn.LayerNorm(model_dim)
-        self.frame_branch = TemporalConvFrameBranch(
+        self.frame_branch = _build_audio_transformer_encoder(
             model_dim=model_dim,
-            feedforward_dim=feedforward_dim,
             num_layers=frame_layers,
+            num_heads=frame_heads,
+            feedforward_dim=feedforward_dim,
             dropout=dropout,
+            position_type=frame_position_type,
+            rope_base=rope_base,
         )
 
     def forward(self, audio, text, audio_key_padding_mask=None):
@@ -322,70 +334,6 @@ class FactUpdateBlock(nn.Module):
         audio = self.audio_norm(audio + self.dropout(attended_audio))
         audio = self.frame_branch(audio, src_key_padding_mask=audio_key_padding_mask)
         return audio, text
-
-
-class TemporalConvFrameBranch(nn.Module):
-    """Dilated temporal convolution branch for frame/audio tokens."""
-
-    def __init__(
-        self,
-        model_dim: int,
-        feedforward_dim: int,
-        num_layers: int,
-        dropout: float,
-    ) -> None:
-        super().__init__()
-        self.layers = nn.ModuleList(
-            [
-                DilatedResidualConvBlock(
-                    model_dim=model_dim,
-                    hidden_dim=feedforward_dim,
-                    dilation=2 ** layer_idx,
-                    dropout=dropout,
-                )
-                for layer_idx in range(max(0, num_layers))
-            ]
-        )
-
-    def forward(self, src, src_key_padding_mask=None):
-        values = _mask_sequence(src, src_key_padding_mask)
-        for layer in self.layers:
-            values = layer(values)
-            values = _mask_sequence(values, src_key_padding_mask)
-        return values
-
-
-class DilatedResidualConvBlock(nn.Module):
-    """Residual 1D temporal convolution with length-preserving padding."""
-
-    def __init__(
-        self,
-        model_dim: int,
-        hidden_dim: int,
-        dilation: int,
-        dropout: float,
-    ) -> None:
-        super().__init__()
-        self.temporal = nn.Conv1d(
-            in_channels=model_dim,
-            out_channels=hidden_dim,
-            kernel_size=3,
-            padding=dilation,
-            dilation=dilation,
-        )
-        self.output = nn.Conv1d(hidden_dim, model_dim, kernel_size=1)
-        self.activation = nn.GELU()
-        self.dropout = nn.Dropout(dropout)
-        self.norm = nn.LayerNorm(model_dim)
-
-    def forward(self, values):
-        residual = values
-        conv_values = values.transpose(1, 2)
-        conv_values = self.temporal(conv_values)
-        conv_values = self.activation(conv_values)
-        conv_values = self.dropout(conv_values)
-        conv_values = self.output(conv_values).transpose(1, 2)
-        return self.norm(residual + self.dropout(conv_values))
 
 
 def _build_transformer_encoder(

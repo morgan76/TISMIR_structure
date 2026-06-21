@@ -75,6 +75,28 @@ def test_preprocess_dataset_text_uses_annotation_processing(tmp_path):
     assert labels["labels"] == ["verse 1", "verse 2", "chorus", "verse 3"]
 
 
+def test_preprocess_dataset_text_can_enumerate_base_occurrences(tmp_path):
+    jams_path = tmp_path / "track.jams"
+    _write_numbered_repeated_jams(jams_path)
+    track = Track(
+        track_id="track",
+        audio_path=tmp_path / "track.wav",
+        jams_path=jams_path,
+        dataset="dataset",
+    )
+
+    results = preprocess_dataset_text(
+        tracks=[track],
+        output_root=tmp_path / "text",
+        text_encoder_name="placeholder",
+        text_encoder_params={"output_dim": 4},
+        annotation_processing={"policy": "enumerate_base_occurrences"},
+    )
+
+    labels = json.loads((Path(results[0].output_dir) / "labels.json").read_text(encoding="utf-8"))
+    assert labels["labels"] == ["verse 1", "chorus", "verse 2", "verse 3"]
+
+
 def _write_jams(path: Path) -> None:
     jam = jams.JAMS()
     jam.file_metadata.duration = 4.0
@@ -95,5 +117,17 @@ def _write_repeated_jams(path: Path) -> None:
     annotation.append(time=1.0, duration=1.0, value="verse")
     annotation.append(time=2.0, duration=1.0, value="chorus")
     annotation.append(time=3.0, duration=1.0, value="verse")
+    jam.annotations.append(annotation)
+    jam.save(str(path))
+
+
+def _write_numbered_repeated_jams(path: Path) -> None:
+    jam = jams.JAMS()
+    jam.file_metadata.duration = 4.0
+    annotation = jams.Annotation(namespace="segment_open")
+    annotation.append(time=0.0, duration=1.0, value="verse2")
+    annotation.append(time=1.0, duration=1.0, value="chorus")
+    annotation.append(time=2.0, duration=1.0, value="verse5")
+    annotation.append(time=3.0, duration=1.0, value="verse2")
     jam.annotations.append(annotation)
     jam.save(str(path))
