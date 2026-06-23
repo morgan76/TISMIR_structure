@@ -1,0 +1,29 @@
+output_root: data/embeddings/text_occurrence_descriptive_random_annotations
+scope: dataset
+
+text_encoder:
+  name: sentence_transformers
+  checkpoint: intfloat/e5-base-v2
+  device: null
+  normalize_embeddings: true
+  batch_size: 32
+
+prompt:
+  mode: occurrence_descriptive
+  normalize_whitespace: true
+
+label_normalization:
+  name: harmonix
+  normalize_whitespace: true
+  disambiguate_duplicates: true
+
+annotation_processing:
+  policy: random
+  seed: 0
+  validation_policy: enumerate_base_occurrences
+  choices:
+    - keep
+    - merge
+    - enumerate_all_occurrences
+    - enumerate_base_occurrences
+    - enumerate_consecutive_repeats

@@ -63,6 +63,9 @@ def _build_temporal_text_adapter(model_config: dict[str, Any], audio_dim: int, t
         ),
         bidirectional_cross_attention=bool(cross_config.get("bidirectional", False)),
         cross_attention_layers=int(cross_config.get("num_layers", 1)),
+        return_intermediate_logits=bool(cross_config.get("intermediate_logits", False)),
+        return_attention=bool(cross_config.get("return_attention", False)),
+        attention_fusion_weight=_attention_fusion_weight(cross_config.get("attention_fusion")),
         temperature=float(sim_config.get("temperature", 0.07)),
         normalize=bool(sim_config.get("normalize", True)),
     )
@@ -72,6 +75,20 @@ def _optional_hidden_dim(config: dict[str, Any]) -> int | None:
     if "hidden_dim" in config and config["hidden_dim"] is None:
         return None
     return int(config.get("hidden_dim", 256))
+
+
+def _attention_fusion_weight(value: Any) -> float:
+    if value in (None, False):
+        return 0.0
+    if value is True:
+        return 0.5
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, dict):
+        raise TypeError("cross_attention.attention_fusion must be a mapping, number, boolean, or null")
+    if not bool(value.get("enabled", True)):
+        return 0.0
+    return float(value.get("weight", value.get("alpha", 0.5)))
 
 
 def _position_config(value: Any) -> dict[str, Any]:

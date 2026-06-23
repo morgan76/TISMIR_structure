@@ -2,6 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import os
+
+if not os.environ.get("LOKY_MAX_CPU_COUNT"):
+    os.environ["LOKY_MAX_CPU_COUNT"] = str(os.cpu_count() or 1)
+if not os.environ.get("NUMBA_CACHE_DIR"):
+    os.environ["NUMBA_CACHE_DIR"] = os.path.abspath(".numba-cache")
 
 from tismir.diagnostics import run_diagnostics
 

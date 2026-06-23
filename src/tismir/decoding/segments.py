@@ -55,6 +55,54 @@ def smooth_logits(logits: np.ndarray, window: int = 1, mode: str = "mean") -> np
     return np.stack(smoothed, axis=0)
 
 
+def decode_label_indices(
+    logits: np.ndarray,
+    strategy: str = "argmax",
+    transition_penalty: float = 0.0,
+) -> np.ndarray:
+    """Decode a label index sequence from frame-label logits."""
+
+    if logits.ndim != 2:
+        raise ValueError("logits must have shape [time, labels]")
+    if logits.shape[0] == 0:
+        return np.asarray([], dtype=int)
+    if strategy == "argmax":
+        return logits.argmax(axis=-1).astype(int)
+    if strategy == "viterbi":
+        return viterbi_decode(logits, transition_penalty=transition_penalty)
+    raise ValueError("strategy must be one of: argmax, viterbi")
+
+
+def viterbi_decode(logits: np.ndarray, transition_penalty: float = 0.0) -> np.ndarray:
+    """Decode logits with a constant penalty for changing labels."""
+
+    if logits.ndim != 2:
+        raise ValueError("logits must have shape [time, labels]")
+    if logits.shape[0] == 0:
+        return np.asarray([], dtype=int)
+    if transition_penalty < 0:
+        raise ValueError("transition_penalty must be non-negative")
+
+    scores = np.asarray(logits, dtype=np.float64)
+    num_frames, num_labels = scores.shape
+    backpointers = np.zeros((num_frames, num_labels), dtype=np.int64)
+    best_scores = scores[0].copy()
+
+    for frame_index in range(1, num_frames):
+        stay_scores = best_scores
+        switch_scores = best_scores - transition_penalty
+        previous_scores = np.broadcast_to(switch_scores[:, np.newaxis], (num_labels, num_labels)).copy()
+        previous_scores[np.arange(num_labels), np.arange(num_labels)] = stay_scores
+        backpointers[frame_index] = previous_scores.argmax(axis=0)
+        best_scores = previous_scores.max(axis=0) + scores[frame_index]
+
+    path = np.zeros(num_frames, dtype=np.int64)
+    path[-1] = int(best_scores.argmax())
+    for frame_index in range(num_frames - 1, 0, -1):
+        path[frame_index - 1] = backpointers[frame_index, path[frame_index]]
+    return path
+
+
 def remove_short_segments(
     segments: Sequence[tuple[float, float, str]],
     min_duration: float = 0.0,

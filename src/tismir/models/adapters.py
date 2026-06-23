@@ -54,6 +54,9 @@ class TemporalTextAdapterBaseline(nn.Module):
         cross_attention_heads: int | None = None,
         bidirectional_cross_attention: bool = False,
         cross_attention_layers: int = 1,
+        return_intermediate_logits: bool = False,
+        return_attention: bool = False,
+        attention_fusion_weight: float = 0.0,
         temperature: float = 0.07,
         normalize: bool = True,
     ) -> None:
@@ -66,6 +69,8 @@ class TemporalTextAdapterBaseline(nn.Module):
             raise ValueError("bidirectional_cross_attention requires cross_attention=True")
         if cross_attention_layers < 1:
             raise ValueError("cross_attention_layers must be positive")
+        if not 0.0 <= attention_fusion_weight <= 1.0:
+            raise ValueError("attention_fusion_weight must be between 0 and 1")
 
         position_type = _resolve_position_type(use_audio_positions, audio_position_type)
         self.audio_projection = _build_projection(audio_dim, audio_hidden_dim, model_dim)
@@ -77,6 +82,9 @@ class TemporalTextAdapterBaseline(nn.Module):
         )
         self.cross_attention_enabled = cross_attention
         self.bidirectional_cross_attention = bidirectional_cross_attention
+        self.return_intermediate_logits = return_intermediate_logits
+        self.return_attention = return_attention
+        self.attention_fusion_weight = attention_fusion_weight
         cross_heads = cross_attention_heads or num_heads
         if cross_attention and model_dim % cross_heads != 0:
             raise ValueError("model_dim must be divisible by cross_attention_heads")
@@ -171,20 +179,48 @@ class TemporalTextAdapterBaseline(nn.Module):
         audio_z = self.audio_projection(audio)
         audio_z = self.audio_positions(audio_z)
         padding_mask = None if audio_mask is None else ~audio_mask.bool()
+        intermediate_logits = []
+        attention_maps = []
+        fusion_attention = None
 
         if self.bidirectional_cross_attention:
             audio_z = self.audio_adapter(audio_z, src_key_padding_mask=padding_mask)
             text_z, shared_text = self._project_text(text, batch_size=audio_z.shape[0])
             text_z = self.fact_input_block(text_z, audio_z, audio_key_padding_mask=padding_mask)
             for block in self.cross_attention_blocks:
-                audio_z, text_z = block(audio_z, text_z, audio_key_padding_mask=padding_mask)
+                block_output = block(
+                    audio_z,
+                    text_z,
+                    audio_key_padding_mask=padding_mask,
+                    need_weights=self.return_attention or self.attention_fusion_weight > 0.0,
+                )
+                audio_z, text_z = block_output.audio, block_output.text
+                if block_output.attention is not None:
+                    attention_maps.append(block_output.attention)
+                    fusion_attention = block_output.attention.get("frame_to_text")
+                if self.return_intermediate_logits:
+                    block_audio = torch.nn.functional.normalize(audio_z, dim=-1)
+                    block_text = torch.nn.functional.normalize(text_z, dim=-1)
+                    intermediate_logits.append(
+                        _frame_label_similarity(block_audio, block_text) / self.temperature
+                    )
             shared_text = False
         else:
             audio_z = self.audio_adapter(audio_z, src_key_padding_mask=padding_mask)
             text_z, shared_text = self._encode_text(text, batch_size=audio_z.shape[0])
             if self.cross_attention_enabled:
-                attended_audio, _ = self.cross_attention(audio_z, text_z, text_z, need_weights=False)
+                need_weights = self.return_attention or self.attention_fusion_weight > 0.0
+                attended_audio, weights = self.cross_attention(
+                    audio_z,
+                    text_z,
+                    text_z,
+                    need_weights=need_weights,
+                    average_attn_weights=True,
+                )
                 audio_z = self.cross_norm(audio_z + self.cross_dropout(attended_audio))
+                if need_weights:
+                    fusion_attention = weights
+                    attention_maps.append({"frame_to_text": weights})
 
         if self.normalize:
             audio_z = torch.nn.functional.normalize(audio_z, dim=-1)
@@ -193,11 +229,24 @@ class TemporalTextAdapterBaseline(nn.Module):
                 text_z = text_z[0]
 
         similarity = _frame_label_similarity(audio_z, text_z)
+        direct_logits = similarity / self.temperature
+        logits = direct_logits
+        if self.attention_fusion_weight > 0.0:
+            if fusion_attention is None:
+                raise ValueError("attention_fusion requires cross-attention weights")
+            attention_logits = torch.log(fusion_attention.clamp_min(1e-8))
+            logits = (
+                (1.0 - self.attention_fusion_weight) * direct_logits
+                + self.attention_fusion_weight * attention_logits
+            )
         return {
             "audio_tokens": audio_z,
             "text_tokens": text_z,
             "similarity": similarity,
-            "logits": similarity / self.temperature,
+            "direct_logits": direct_logits,
+            "logits": logits,
+            "intermediate_logits": intermediate_logits,
+            "attention_maps": attention_maps,
         }
 
     def _encode_text(self, text, batch_size: int):
@@ -319,21 +368,43 @@ class FactUpdateBlock(nn.Module):
             rope_base=rope_base,
         )
 
-    def forward(self, audio, text, audio_key_padding_mask=None):
-        attended_text, _ = self.text_from_audio(
+    def forward(self, audio, text, audio_key_padding_mask=None, need_weights: bool = False):
+        attended_text, label_to_frame = self.text_from_audio(
             text,
             audio,
             audio,
             key_padding_mask=audio_key_padding_mask,
-            need_weights=False,
+            need_weights=need_weights,
+            average_attn_weights=True,
         )
         text = self.text_norm(text + self.dropout(attended_text))
         text = self.action_branch(text)
 
-        attended_audio, _ = self.audio_from_text(audio, text, text, need_weights=False)
+        attended_audio, frame_to_text = self.audio_from_text(
+            audio,
+            text,
+            text,
+            need_weights=need_weights,
+            average_attn_weights=True,
+        )
         audio = self.audio_norm(audio + self.dropout(attended_audio))
         audio = self.frame_branch(audio, src_key_padding_mask=audio_key_padding_mask)
-        return audio, text
+        attention = None
+        if need_weights:
+            attention = {
+                "label_to_frame": label_to_frame,
+                "frame_to_text": frame_to_text,
+            }
+        return FactUpdateOutput(audio=audio, text=text, attention=attention)
+
+
+class FactUpdateOutput:
+    """Container for one FACT update block output."""
+
+    def __init__(self, audio, text, attention=None) -> None:
+        self.audio = audio
+        self.text = text
+        self.attention = attention
 
 
 def _build_transformer_encoder(
@@ -354,7 +425,7 @@ def _build_transformer_encoder(
         batch_first=True,
         norm_first=False,
     )
-    return nn.TransformerEncoder(layer, num_layers=num_layers)
+    return nn.TransformerEncoder(layer, num_layers=num_layers, enable_nested_tensor=False)
 
 
 def _build_audio_transformer_encoder(

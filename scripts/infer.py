@@ -38,6 +38,8 @@ def main() -> None:
     )
     parser.add_argument("--smoothing-window", type=int, default=1)
     parser.add_argument("--smoothing-mode", choices=["mean", "median"], default="mean")
+    parser.add_argument("--decoder", choices=["argmax", "viterbi"], default="argmax")
+    parser.add_argument("--transition-penalty", type=float, default=0.0)
     parser.add_argument("--min-segment-duration", type=float, default=0.0)
     args = parser.parse_args()
 
@@ -57,6 +59,8 @@ def main() -> None:
         annotation_processing=None if args.annotation_policy is None else {"policy": args.annotation_policy},
         smoothing_window=args.smoothing_window,
         smoothing_mode=args.smoothing_mode,
+        decoder=args.decoder,
+        transition_penalty=args.transition_penalty,
         min_segment_duration=args.min_segment_duration,
     )
 

@@ -7,7 +7,12 @@ from typing import Any
 import numpy as np
 
 from tismir.decoding.jams import save_segments_jams
-from tismir.decoding.segments import merge_frame_labels, remove_short_segments, smooth_logits
+from tismir.decoding.segments import (
+    decode_label_indices,
+    merge_frame_labels,
+    remove_short_segments,
+    smooth_logits,
+)
 from tismir.models import build_model
 from tismir.training.data import StructureEmbeddingDataset
 
@@ -28,6 +33,8 @@ def run_baseline_inference(
     annotation_processing: str | dict[str, Any] | None = None,
     smoothing_window: int = 1,
     smoothing_mode: str = "mean",
+    decoder: str = "argmax",
+    transition_penalty: float = 0.0,
     min_segment_duration: float = 0.0,
 ) -> list[dict[str, Any]]:
     """Run baseline inference over a manifest and save predictions."""
@@ -70,7 +77,11 @@ def run_baseline_inference(
             logits = model(audio, text)[0].detach().cpu().numpy()
 
         decoded_logits = smooth_logits(logits, window=smoothing_window, mode=smoothing_mode)
-        label_indices = decoded_logits.argmax(axis=-1)
+        label_indices = decode_label_indices(
+            decoded_logits,
+            strategy=decoder,
+            transition_penalty=transition_penalty,
+        )
         frame_labels = [example.labels[int(label_index)] for label_index in label_indices]
         segments = merge_frame_labels(example.beat_intervals, frame_labels)
         segments = remove_short_segments(segments, min_duration=min_segment_duration)
@@ -92,8 +103,11 @@ def run_baseline_inference(
                 "annotation_processing": annotation_processing,
                 "smoothing_window": smoothing_window,
                 "smoothing_mode": smoothing_mode,
+                "decoder": decoder,
+                "transition_penalty": transition_penalty,
                 "min_segment_duration": min_segment_duration,
             },
+            label_indices,
         )
 
         result = {
@@ -120,6 +134,7 @@ def _save_prediction_json(
     raw_logits: np.ndarray,
     decoded_logits: np.ndarray,
     decoding: dict[str, Any],
+    label_indices: np.ndarray,
 ) -> None:
     probabilities = _softmax(decoded_logits, axis=-1)
     payload = {
@@ -131,7 +146,7 @@ def _save_prediction_json(
             {"start": start, "end": end, "label": label}
             for start, end, label in segments
         ],
-        "frame_label_indices": decoded_logits.argmax(axis=-1).astype(int).tolist(),
+        "frame_label_indices": label_indices.astype(int).tolist(),
         "frame_confidence": probabilities.max(axis=-1).astype(float).tolist(),
         "raw_frame_label_indices": raw_logits.argmax(axis=-1).astype(int).tolist(),
     }

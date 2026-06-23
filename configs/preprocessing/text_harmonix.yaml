@@ -9,7 +9,7 @@ text_encoder:
   batch_size: 32
 
 prompt:
-  template: "{label}"
+  mode: bare
   normalize_whitespace: true
 
 label_normalization:

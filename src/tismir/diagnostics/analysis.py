@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from html import escape
 from pathlib import Path
 from typing import Any
+
+if not os.environ.get("NUMBA_CACHE_DIR"):
+    os.environ["NUMBA_CACHE_DIR"] = str(Path(".numba-cache").resolve())
+if not os.environ.get("LOKY_MAX_CPU_COUNT"):
+    os.environ["LOKY_MAX_CPU_COUNT"] = str(os.cpu_count() or 1)
 
 import numpy as np
 
@@ -74,16 +80,23 @@ def run_diagnostics(
             text_tokens = text_tokens[0]
         audio_text = features["similarity"][0].detach().cpu().numpy().astype(np.float32)
         logits = features["logits"][0].detach().cpu().numpy().astype(np.float32)
+        probabilities = _softmax(logits, axis=-1).astype(np.float32)
         predictions = logits.argmax(axis=-1).astype(np.int64)
 
         text_text = _cosine_matrix(text_tokens, text_tokens)
         audio_indices = _sample_indices(len(audio_tokens), max_count=audio_audio_max_frames)
         audio_audio = _cosine_matrix(audio_tokens[audio_indices], audio_tokens[audio_indices])
+        probability_self = (probabilities[audio_indices] @ probabilities[audio_indices].T).astype(np.float32)
+        probability_reference = _same_label_matrix(
+            example.targets[audio_indices],
+            ignore_index=int(config.get("data", {}).get("ignore_index", -100)),
+        )
         summary = _summarize_track(
             text_text=text_text,
             audio_audio=audio_audio,
             audio_audio_indices=audio_indices,
             audio_text=audio_text,
+            probability_self=probability_self,
             targets=example.targets,
             predictions=predictions,
             ignore_index=int(config.get("data", {}).get("ignore_index", -100)),
@@ -96,6 +109,8 @@ def run_diagnostics(
             text_text_similarity=text_text,
             audio_text_similarity=audio_text,
             audio_audio_similarity=audio_audio,
+            probability_self_similarity=probability_self,
+            probability_reference_similarity=probability_reference,
             audio_audio_indices=audio_indices.astype(np.int64),
             targets=example.targets.astype(np.int64),
             predictions=predictions.astype(np.int64),
@@ -109,9 +124,13 @@ def run_diagnostics(
                 labels=example.labels,
                 targets=example.targets,
                 predictions=predictions,
+                audio_tokens=audio_tokens,
+                text_tokens=text_tokens,
                 text_text=text_text,
                 audio_text=audio_text,
                 audio_audio=audio_audio,
+                probability_self=probability_self,
+                probability_reference=probability_reference,
                 audio_audio_indices=audio_indices,
             )
 
@@ -148,6 +167,7 @@ def _summarize_track(
     audio_audio: np.ndarray,
     audio_audio_indices: np.ndarray,
     audio_text: np.ndarray,
+    probability_self: np.ndarray,
     targets: np.ndarray,
     predictions: np.ndarray,
     ignore_index: int,
@@ -173,6 +193,8 @@ def _summarize_track(
     offdiag_pair_mask = ~np.eye(len(audio_audio), dtype=bool)
     same_values = audio_audio[valid_pair_mask & offdiag_pair_mask & same_mask]
     different_values = audio_audio[valid_pair_mask & offdiag_pair_mask & ~same_mask]
+    probability_same_values = probability_self[valid_pair_mask & offdiag_pair_mask & same_mask]
+    probability_different_values = probability_self[valid_pair_mask & offdiag_pair_mask & ~same_mask]
 
     audio_change = 1.0 - np.sum(_normalize_rows(audio_text[:-1]) * _normalize_rows(audio_text[1:]), axis=1)
     boundary_mask = _boundary_mask(targets, ignore_index=ignore_index)
@@ -186,6 +208,8 @@ def _summarize_track(
         "audio_text_gt_margin_mean": _safe_mean(margins),
         "audio_audio_same_label_mean": _safe_mean(same_values),
         "audio_audio_different_label_mean": _safe_mean(different_values),
+        "probability_same_label_mean": _safe_mean(probability_same_values),
+        "probability_different_label_mean": _safe_mean(probability_different_values),
         "audio_text_change_at_boundary_mean": _safe_mean(audio_change[boundary_mask]),
         "audio_text_change_non_boundary_mean": _safe_mean(audio_change[non_boundary_mask]),
     }
@@ -209,11 +233,16 @@ def _save_plots(
     labels: list[str],
     targets: np.ndarray,
     predictions: np.ndarray,
+    audio_tokens: np.ndarray,
+    text_tokens: np.ndarray,
     text_text: np.ndarray,
     audio_text: np.ndarray,
     audio_audio: np.ndarray,
+    probability_self: np.ndarray,
+    probability_reference: np.ndarray,
     audio_audio_indices: np.ndarray,
 ) -> None:
+    _set_projection_environment_defaults()
     _save_svg_plots(
         track_dir=track_dir,
         labels=labels,
@@ -306,6 +335,33 @@ def _save_plots(
     fig.savefig(track_dir / "audio_audio_similarity.png", dpi=160)
     plt.close(fig)
 
+    _save_probability_self_plot(
+        plt=plt,
+        track_dir=track_dir,
+        probability_self=probability_self,
+        probability_reference=probability_reference,
+        audio_audio_indices=audio_audio_indices,
+        targets=targets,
+    )
+    _save_tsne_plot(
+        plt=plt,
+        track_dir=track_dir,
+        audio_tokens=audio_tokens,
+        text_tokens=text_tokens,
+        audio_indices=audio_audio_indices,
+        targets=targets,
+        labels=labels,
+    )
+    _save_umap_plot(
+        plt=plt,
+        track_dir=track_dir,
+        audio_tokens=audio_tokens,
+        text_tokens=text_tokens,
+        audio_indices=audio_audio_indices,
+        targets=targets,
+        labels=labels,
+    )
+
 
 def _save_svg_plots(
     track_dir: Path,
@@ -361,6 +417,207 @@ def _annotate_label_strip(ax, values: np.ndarray, labels: list[str], min_width: 
                 clip_on=True,
             )
         start = end
+
+
+def _save_probability_self_plot(
+    plt,
+    track_dir: Path,
+    probability_self: np.ndarray,
+    probability_reference: np.ndarray,
+    audio_audio_indices: np.ndarray,
+    targets: np.ndarray,
+) -> None:
+    boundaries = np.flatnonzero(_boundary_mask(targets, ignore_index=-100)) + 1
+    sampled_boundary_positions = np.searchsorted(audio_audio_indices, boundaries)
+
+    fig, axes = plt.subplots(ncols=2, figsize=(15, 6.5), constrained_layout=True)
+    for ax, matrix, title in [
+        (axes[0], probability_self, "Predicted same-label probability"),
+        (axes[1], probability_reference, "Reference same-label matrix"),
+    ]:
+        image = ax.imshow(matrix, vmin=0.0, vmax=1.0, cmap="magma", origin="lower")
+        for boundary in sampled_boundary_positions:
+            if 0 <= boundary < len(audio_audio_indices):
+                ax.axvline(boundary - 0.5, color="white", linewidth=0.35, alpha=0.55)
+                ax.axhline(boundary - 0.5, color="white", linewidth=0.35, alpha=0.55)
+        ax.set_title(title)
+        ax.set_xlabel("sampled beat frame")
+        ax.set_ylabel("sampled beat frame")
+        fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    fig.savefig(track_dir / "probability_self_similarity.png", dpi=170)
+    plt.close(fig)
+
+
+def _save_tsne_plot(
+    plt,
+    track_dir: Path,
+    audio_tokens: np.ndarray,
+    text_tokens: np.ndarray,
+    audio_indices: np.ndarray,
+    targets: np.ndarray,
+    labels: list[str],
+) -> None:
+    _set_projection_environment_defaults()
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Could not find the number of physical cores.*",
+            category=UserWarning,
+        )
+        try:
+            from sklearn.manifold import TSNE
+        except ImportError:  # pragma: no cover - optional diagnostic dependency
+            return
+
+        sampled_audio = audio_tokens[audio_indices]
+        values = np.concatenate([sampled_audio, text_tokens], axis=0)
+        if len(values) < 4:
+            return
+        perplexity = max(2, min(30, (len(values) - 1) // 3))
+        embedding = TSNE(
+            n_components=2,
+            perplexity=perplexity,
+            init="pca",
+            learning_rate="auto",
+            random_state=0,
+        ).fit_transform(values)
+
+    _save_token_projection_plot(
+        plt=plt,
+        path=track_dir / "token_tsne.png",
+        title="Audio/text token t-SNE",
+        embedding=embedding,
+        num_audio=len(sampled_audio),
+        sampled_targets=targets[audio_indices],
+        labels=labels,
+    )
+
+
+def _save_umap_plot(
+    plt,
+    track_dir: Path,
+    audio_tokens: np.ndarray,
+    text_tokens: np.ndarray,
+    audio_indices: np.ndarray,
+    targets: np.ndarray,
+    labels: list[str],
+) -> None:
+    _set_projection_environment_defaults()
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Could not find the number of physical cores.*",
+            category=UserWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message="n_jobs value .* overridden to 1 by setting random_state.*",
+            category=UserWarning,
+        )
+        try:
+            from umap import UMAP
+        except ImportError:  # pragma: no cover - optional diagnostic dependency
+            return
+
+        sampled_audio = audio_tokens[audio_indices]
+        values = np.concatenate([sampled_audio, text_tokens], axis=0)
+        if len(values) < 4:
+            return
+        n_neighbors = max(2, min(15, len(values) - 1))
+        embedding = UMAP(
+            n_components=2,
+            n_neighbors=n_neighbors,
+            min_dist=0.1,
+            metric="cosine",
+            init="random",
+            random_state=0,
+        ).fit_transform(values)
+
+    _save_token_projection_plot(
+        plt=plt,
+        path=track_dir / "token_umap.png",
+        title="Audio/text token UMAP",
+        embedding=embedding,
+        num_audio=len(sampled_audio),
+        sampled_targets=targets[audio_indices],
+        labels=labels,
+    )
+
+
+def _save_token_projection_plot(
+    plt,
+    path: Path,
+    title: str,
+    embedding: np.ndarray,
+    num_audio: int,
+    sampled_targets: np.ndarray,
+    labels: list[str],
+) -> None:
+    audio_embedding = embedding[:num_audio]
+    text_embedding = embedding[num_audio:]
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    label_cmap = _label_colormap(plt, len(labels))
+    valid = sampled_targets != -100
+    if valid.any():
+        ax.scatter(
+            audio_embedding[valid, 0],
+            audio_embedding[valid, 1],
+            c=sampled_targets[valid],
+            cmap=label_cmap,
+            vmin=-0.5,
+            vmax=len(labels) + 0.5,
+            s=12,
+            alpha=0.55,
+            linewidths=0,
+            label="audio frames",
+        )
+    if (~valid).any():
+        ax.scatter(
+            audio_embedding[~valid, 0],
+            audio_embedding[~valid, 1],
+            c="#bdbdbd",
+            s=10,
+            alpha=0.35,
+            linewidths=0,
+            label="ignored frames",
+        )
+    ax.scatter(
+        text_embedding[:, 0],
+        text_embedding[:, 1],
+        marker="X",
+        c=np.arange(len(labels)),
+        cmap=label_cmap,
+        vmin=-0.5,
+        vmax=len(labels) + 0.5,
+        s=90,
+        edgecolors="black",
+        linewidths=0.6,
+        label="text labels",
+    )
+    for index, label in enumerate(labels):
+        ax.text(
+            text_embedding[index, 0],
+            text_embedding[index, 1],
+            label,
+            fontsize=8,
+            ha="left",
+            va="bottom",
+        )
+    ax.set_title(title)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.legend(loc="best", frameon=False)
+    fig.tight_layout()
+    fig.savefig(path, dpi=170)
+    plt.close(fig)
+
+
+def _set_projection_environment_defaults() -> None:
+    if not os.environ.get("NUMBA_CACHE_DIR"):
+        os.environ["NUMBA_CACHE_DIR"] = str(Path(".numba-cache").resolve())
+    if not os.environ.get("LOKY_MAX_CPU_COUNT"):
+        os.environ["LOKY_MAX_CPU_COUNT"] = str(os.cpu_count() or 1)
 
 
 def _save_text_text_svg(path: Path, labels: list[str], matrix: np.ndarray) -> None:
@@ -515,6 +772,8 @@ def _summarize_corpus(results: list[dict[str, Any]]) -> dict[str, dict[str, floa
         "audio_text_gt_margin_mean",
         "audio_audio_same_label_mean",
         "audio_audio_different_label_mean",
+        "probability_same_label_mean",
+        "probability_different_label_mean",
         "audio_text_change_at_boundary_mean",
         "audio_text_change_non_boundary_mean",
     ]
@@ -544,6 +803,18 @@ def _sample_indices(length: int, max_count: int) -> np.ndarray:
     if length <= max_count:
         return np.arange(length, dtype=np.int64)
     return np.linspace(0, length - 1, num=max_count).round().astype(np.int64)
+
+
+def _same_label_matrix(targets: np.ndarray, ignore_index: int) -> np.ndarray:
+    valid = targets != ignore_index
+    same = (targets[:, None] == targets[None, :]) & valid[:, None] & valid[None, :]
+    return same.astype(np.float32)
+
+
+def _softmax(values: np.ndarray, axis: int) -> np.ndarray:
+    values = values - values.max(axis=axis, keepdims=True)
+    exp = np.exp(values)
+    return exp / exp.sum(axis=axis, keepdims=True)
 
 
 def _boundary_mask(targets: np.ndarray, ignore_index: int) -> np.ndarray:

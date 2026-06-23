@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from tismir.data.annotations import assign_intervals_to_adjusted_timeline, process_sections
+from tismir.data.annotations import (
+    assign_intervals_to_adjusted_timeline,
+    concrete_annotation_processing_choices,
+    is_random_annotation_processing,
+    process_sections,
+)
 from tismir.data.jams import load_structure_sections, unique_labels
 from tismir.data.manifest import load_manifest
 from tismir.data.schemas import Track
@@ -53,12 +60,24 @@ class StructureEmbeddingDataset:
         self.candidate_label_strategy = candidate_label_strategy
         self.ignore_index = ignore_index
         self.annotation_processing = annotation_processing
+        self.epoch = 0
 
     def __len__(self) -> int:
         return len(self.tracks)
 
+    def set_epoch(self, epoch: int) -> None:
+        """Set the current epoch for deterministic per-track annotation sampling."""
+
+        self.epoch = int(epoch)
+
     def __getitem__(self, index: int) -> TrainingExample:
         track = self.tracks[index]
+        annotation_processing = _resolve_annotation_processing_for_example(
+            self.annotation_processing,
+            epoch=self.epoch,
+            index=index,
+            track_id=track.track_id,
+        )
         return load_training_example(
             track=track,
             audio_embedding_root=self.audio_embedding_root,
@@ -69,7 +88,7 @@ class StructureEmbeddingDataset:
             namespace=self.namespace,
             candidate_label_strategy=self.candidate_label_strategy,
             ignore_index=self.ignore_index,
-            annotation_processing=self.annotation_processing,
+            annotation_processing=annotation_processing,
         )
 
 
@@ -90,15 +109,15 @@ def load_training_example(
     audio_dir = Path(audio_embedding_root) / audio_encoder / track.dataset / track.track_id
     text_dir = Path(text_embedding_root) / text_encoder / track.dataset
 
-    audio = np.load(audio_dir / f"{audio_embedding_key}.npy").astype(np.float32)
-    beats = np.load(audio_dir / "beats.npy").astype(np.float32)
+    audio = np.load(audio_dir / f"{audio_embedding_key}.npy").astype(np.float32, copy=False)
+    beats = np.load(audio_dir / "beats.npy").astype(np.float32, copy=False)
     metadata = _load_json(audio_dir / "metadata.json")
     duration = float(metadata["outputs"]["duration"])
     beat_intervals = build_beat_intervals(beats, track_duration=duration)
 
     labels_payload = _load_json(text_dir / "labels.json")
     dataset_labels = list(labels_payload["labels"])
-    dataset_text = np.load(text_dir / "embeddings.npy").astype(np.float32)
+    dataset_text = np.load(text_dir / "embeddings.npy").astype(np.float32, copy=False)
     if len(dataset_labels) != len(dataset_text):
         raise ValueError(f"Label/text embedding mismatch in {text_dir}")
 
@@ -198,3 +217,24 @@ def collate_training_examples(examples: list[TrainingExample]) -> dict[str, Any]
 def _load_json(path: str | Path) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _resolve_annotation_processing_for_example(
+    annotation_processing: str | dict[str, Any] | None,
+    epoch: int,
+    index: int,
+    track_id: str,
+) -> str | dict[str, Any] | None:
+    if not is_random_annotation_processing(annotation_processing):
+        return annotation_processing
+    assert isinstance(annotation_processing, dict)
+    choices = concrete_annotation_processing_choices(annotation_processing)
+    seed = int(annotation_processing.get("seed", 0))
+    rng = random.Random(_stable_epoch_seed(seed, epoch, index, track_id))
+    return choices[rng.randrange(len(choices))]
+
+
+def _stable_epoch_seed(seed: int, epoch: int, index: int, track_id: str) -> int:
+    payload = f"{seed}:{epoch}:{index}:{track_id}".encode("utf-8")
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="big", signed=False)

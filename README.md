@@ -228,13 +228,26 @@ python scripts/preprocess_text.py \
   --scope track
 ```
 
-Prompt templates are configurable:
+Prompt modes are configurable. The default is `bare`, which embeds the label
+text directly. `compact` adds a short task prefix, and `descriptive` adds a
+music-structure description for ablations:
 
 ```yaml
 prompt:
-  template: "{label}"
+  mode: bare
   normalize_whitespace: true
 ```
+
+Available built-in modes:
+
+```yaml
+bare: "{label}"
+compact: "Music structure label: {label}"
+descriptive: "Music structure label: {label}. Base type: {base_label}. Occurrence: {occurrence_description}. Meaning: {description}. Use this label for frames belonging to this section."
+```
+
+For custom ablations, `prompt.template` can still be set explicitly and will
+override the selected mode template.
 
 Annotation label post-processing is also configurable. This is useful when a
 dataset contains adjacent sections with the same label, such as `verse -> verse`.
@@ -326,6 +339,52 @@ python scripts/train.py --config configs/train/baseline.yaml
 
 The baseline projects beat-synchronous audio embeddings and candidate text-label embeddings into a shared space, then optimizes frame-label cross entropy over the provided label set. Checkpoints and metrics are saved under the configured `output_dir`.
 
+When a validation manifest is configured, training saves `best_checkpoint.pt`
+using validation loss. You can also save `best_segmentation_checkpoint.pt`
+using an in-memory segmentation metric on a validation subset:
+
+```yaml
+validation:
+  manifest: data/manifests/harmonix_val.local.jsonl
+  segmentation:
+    enabled: true
+    limit: 64
+    monitor: F-measure@3.0
+    smoothing_window: 9
+    decoder: viterbi
+    transition_penalty: 1.5
+```
+
+Progress bars within each epoch can be enabled with:
+
+```yaml
+optimization:
+  progress: true
+```
+
+A compact PyTorch model summary is printed before training starts by default.
+It can be customized or disabled with:
+
+```yaml
+optimization:
+  model_summary:
+    enabled: true
+    depth: 2
+    max_lines: 80
+```
+
+Frame-label CE can be regularized with a pairwise probability loss. This loss
+computes the full valid frame-pair matrix, uses the model-implied same-label
+probability `p_i^T p_j`, and applies BCE against whether the reference labels
+match:
+
+```yaml
+loss:
+  pairwise_probability:
+    weight: 0.5
+    balance: true
+```
+
 The next model family adds transformer adapters on top of the precomputed embeddings. Audio frames receive sinusoidal beat-position encodings before audio self-attention, text label tokens are refined with text self-attention, and an optional cross-attention block lets audio frames attend to the current candidate label set before frame-label scoring:
 
 ```bash
@@ -368,6 +427,34 @@ Inference defaults to `--candidate-label-strategy track_labels`, matching the
 training condition where the model only sees the current track's label set.
 Use `--candidate-label-strategy dataset_labels` to score against all
 precomputed labels for the dataset instead.
+
+For structured decoding, use the Viterbi decoder with a constant transition
+penalty between labels. This usually reduces short framewise label flicker:
+
+```bash
+python scripts/infer.py \
+  ... \
+  --smoothing-window 9 \
+  --decoder viterbi \
+  --transition-penalty 1.5
+```
+
+Diagnostics can be generated after validation to inspect token relations:
+
+```bash
+python scripts/diagnose.py \
+  --checkpoint outputs/train/.../best_segmentation_checkpoint.pt \
+  --manifest data/manifests/harmonix_val.local.jsonl \
+  --audio-encoder mert \
+  --text-encoder sentence_transformers \
+  --output-dir outputs/diagnostics/run_name \
+  --candidate-label-strategy track_labels \
+  --annotation-policy enumerate_base_occurrences
+```
+
+Per-track diagnostics include audio/text similarity heatmaps, the predicted
+`P P^T` same-label probability matrix against the reference same-label matrix,
+and an audio/text token t-SNE projection.
 
 ## Evaluation
 
@@ -539,6 +626,10 @@ python scripts/preprocess_text.py \
   --config configs/preprocessing/text_harmonix.yaml \
   --manifest data/manifests/harmonix.local.jsonl
 ```
+
+The default Harmonix text config uses `prompt.mode: bare`. For prompt ablations,
+use `configs/preprocessing/text_harmonix_compact.yaml` or
+`configs/preprocessing/text_harmonix_descriptive.yaml`.
 
 Create a full local split:
 

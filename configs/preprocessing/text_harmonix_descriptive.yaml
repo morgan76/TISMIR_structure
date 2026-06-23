@@ -1,4 +1,4 @@
-output_root: data/embeddings/text
+output_root: data/embeddings/text_descriptive
 scope: dataset
 
 text_encoder:
@@ -9,5 +9,10 @@ text_encoder:
   batch_size: 32
 
 prompt:
-  mode: bare
+  mode: descriptive
   normalize_whitespace: true
+
+label_normalization:
+  name: harmonix
+  normalize_whitespace: true
+  disambiguate_duplicates: true

@@ -1,3 +1,4 @@
+import json
 import wave
 from pathlib import Path
 
@@ -253,6 +254,64 @@ def test_structure_embedding_dataset_can_enumerate_base_occurrences(tmp_path):
     np.testing.assert_array_equal(example.targets, [0, 0, 1, 1])
 
 
+def test_structure_embedding_dataset_samples_annotation_processing_by_epoch(tmp_path):
+    audio_path = tmp_path / "audio.wav"
+    jams_path = tmp_path / "audio.jams"
+    manifest_path = tmp_path / "manifest.jsonl"
+    _write_silent_wav(audio_path, duration=2.0, sample_rate=8000)
+    _write_repeated_jams(jams_path)
+    track = Track(
+        track_id="track",
+        audio_path=audio_path,
+        jams_path=jams_path,
+        dataset="dataset",
+    )
+    save_manifest(manifest_path, [track])
+
+    preprocess_track_audio(
+        track=track,
+        output_root=tmp_path / "audio_embeddings",
+        audio_encoder_name="placeholder",
+        audio_encoder_params={"output_dim": 4, "frame_rate": 4.0},
+        beat_tracker_name="uniform",
+        beat_tracker_params={"beat_period": 0.5},
+        pooling={"method": "mean", "keep_dense": True},
+    )
+    _write_text_embedding_cache(
+        tmp_path / "text_embeddings" / "placeholder" / "dataset",
+        labels=["verse", "verse 1", "verse 2"],
+        output_dim=3,
+    )
+
+    dataset = StructureEmbeddingDataset(
+        manifest=manifest_path,
+        audio_embedding_root=tmp_path / "audio_embeddings",
+        audio_encoder="placeholder",
+        text_embedding_root=tmp_path / "text_embeddings",
+        text_encoder="placeholder",
+        candidate_label_strategy="track_labels",
+        annotation_processing={
+            "policy": "random",
+            "seed": 0,
+            "choices": ["merge", "enumerate_consecutive_repeats"],
+        },
+    )
+
+    seen_labels = set()
+    for epoch in range(64):
+        dataset.set_epoch(epoch)
+        first = dataset[0]
+        second = dataset[0]
+        assert second.labels == first.labels
+        np.testing.assert_array_equal(second.targets, first.targets)
+        seen_labels.add(tuple(first.labels))
+        if len(seen_labels) == 2:
+            break
+
+    assert ("verse",) in seen_labels
+    assert ("verse 1", "verse 2") in seen_labels
+
+
 def _write_silent_wav(path: Path, duration: float, sample_rate: int) -> None:
     num_frames = int(duration * sample_rate)
     with wave.open(str(path), "wb") as handle:
@@ -300,3 +359,13 @@ def _write_numbered_repeated_jams(path: Path) -> None:
     annotation.append(time=1.0, duration=1.0, value="verse5")
     jam.annotations.append(annotation)
     jam.save(str(path))
+
+
+def _write_text_embedding_cache(path: Path, labels: list[str], output_dim: int) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "labels.json").write_text(json.dumps({"labels": labels}), encoding="utf-8")
+    embeddings = np.arange(len(labels) * output_dim, dtype=np.float32).reshape(
+        len(labels),
+        output_dim,
+    )
+    np.save(path / "embeddings.npy", embeddings)

@@ -16,6 +16,7 @@ ANNOTATION_PROCESSING_POLICIES = {
     "enumerate_base_occurrences",
     "enumerate_consecutive_repeats",
 }
+RANDOM_ANNOTATION_PROCESSING_POLICIES = {"random", "sample"}
 
 
 def process_sections(
@@ -53,6 +54,71 @@ def process_sections(
             separator=config["separator"],
         )
     raise ValueError(f"Unknown annotation processing policy: {policy}")
+
+
+def is_random_annotation_processing(annotation_processing: Any) -> bool:
+    """Return whether an annotation-processing config describes policy sampling."""
+
+    if not isinstance(annotation_processing, dict):
+        return False
+    return str(annotation_processing.get("policy", "")).lower() in RANDOM_ANNOTATION_PROCESSING_POLICIES
+
+
+def concrete_annotation_processing_choices(
+    annotation_processing: dict[str, Any],
+) -> list[str | dict[str, Any]]:
+    """Return concrete annotation policies from a random policy config."""
+
+    policy = str(annotation_processing.get("policy", "")).lower()
+    if policy not in RANDOM_ANNOTATION_PROCESSING_POLICIES:
+        raise ValueError("annotation_processing.policy must be random or sample")
+    choices = annotation_processing.get("choices", annotation_processing.get("policies"))
+    if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes)) or not choices:
+        raise ValueError("random annotation_processing requires a non-empty choices list")
+
+    concrete: list[str | dict[str, Any]] = []
+    for choice in choices:
+        concrete.append(_concrete_annotation_processing_choice(annotation_processing, choice))
+    return concrete
+
+
+def validation_annotation_processing_choice(
+    annotation_processing: dict[str, Any],
+) -> str | dict[str, Any]:
+    """Return the deterministic validation policy for a random training config."""
+
+    validation_choice = annotation_processing.get(
+        "validation_policy",
+        annotation_processing.get("default_policy"),
+    )
+    if validation_choice is None:
+        choices = concrete_annotation_processing_choices(annotation_processing)
+        if any(_annotation_processing_config(choice)["policy"] == "enumerate_base_occurrences" for choice in choices):
+            validation_choice = "enumerate_base_occurrences"
+        else:
+            validation_choice = choices[0]
+    return _concrete_annotation_processing_choice(annotation_processing, validation_choice)
+
+
+def _concrete_annotation_processing_choice(
+    parent: dict[str, Any],
+    choice: str | dict[str, Any],
+) -> str | dict[str, Any]:
+    if isinstance(choice, str):
+        config: dict[str, Any] = {"policy": choice}
+    elif isinstance(choice, dict):
+        config = dict(choice)
+    else:
+        raise TypeError("annotation_processing choices must be strings or mappings")
+
+    policy = str(config.get("policy", "")).lower()
+    if policy in RANDOM_ANNOTATION_PROCESSING_POLICIES:
+        raise ValueError("nested random annotation_processing choices are not supported")
+    for key in ("separator", "start_index"):
+        if key in parent and key not in config:
+            config[key] = parent[key]
+    _annotation_processing_config(config)
+    return config
 
 
 def merge_consecutive_same_label_sections(sections: Sequence[Section]) -> list[Section]:

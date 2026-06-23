@@ -5,11 +5,19 @@ from tismir.losses.contrastive import (
     audio_to_text_infonce,
     text_to_audio_infonce,
 )
-from tismir.losses.frame_label import frame_label_cross_entropy
+from tismir.losses.frame_label import (
+    cross_similarity_matching_loss,
+    frame_label_cross_entropy,
+    pairwise_probability_loss,
+    token_uniformity_loss,
+)
 
 __all__ = [
     "audio_audio_supervised_contrastive",
     "audio_to_text_infonce",
+    "cross_similarity_matching_loss",
     "frame_label_cross_entropy",
+    "pairwise_probability_loss",
     "text_to_audio_infonce",
+    "token_uniformity_loss",
 ]

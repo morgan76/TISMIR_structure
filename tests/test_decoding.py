@@ -1,6 +1,6 @@
 import numpy as np
 
-from tismir.decoding.segments import remove_short_segments, smooth_logits
+from tismir.decoding.segments import decode_label_indices, remove_short_segments, smooth_logits
 
 
 def test_smooth_logits_mean():
@@ -9,6 +9,34 @@ def test_smooth_logits_mean():
     smoothed = smooth_logits(logits, window=3, mode="mean")
 
     np.testing.assert_allclose(smoothed[1], [10.0 / 3.0, 2.0 / 3.0])
+
+
+def test_viterbi_decode_matches_argmax_without_transition_penalty():
+    logits = np.asarray(
+        [
+            [3.0, 0.0],
+            [0.0, 2.0],
+            [4.0, 0.0],
+        ]
+    )
+
+    decoded = decode_label_indices(logits, strategy="viterbi", transition_penalty=0.0)
+
+    np.testing.assert_array_equal(decoded, [0, 1, 0])
+
+
+def test_viterbi_decode_penalizes_short_label_changes():
+    logits = np.asarray(
+        [
+            [3.0, 0.0],
+            [0.0, 2.0],
+            [3.0, 0.0],
+        ]
+    )
+
+    decoded = decode_label_indices(logits, strategy="viterbi", transition_penalty=2.0)
+
+    np.testing.assert_array_equal(decoded, [0, 0, 0])
 
 
 def test_remove_short_segments_merges_into_neighbor():

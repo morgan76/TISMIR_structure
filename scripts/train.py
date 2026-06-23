@@ -20,6 +20,14 @@ def main() -> None:
         print(f"best validation loss: {metrics['best_val_loss']:.6f}")
         if metrics.get("best_epoch") is not None:
             print(f"best epoch: {metrics['best_epoch']}")
+    if metrics.get("best_segmentation_checkpoint") is not None:
+        print(f"saved best segmentation checkpoint: {metrics['best_segmentation_checkpoint']}")
+        print(
+            f"best {metrics['best_segmentation_metric']}: "
+            f"{metrics['best_segmentation_score']:.6f}"
+        )
+        if metrics.get("best_segmentation_epoch") is not None:
+            print(f"best segmentation epoch: {metrics['best_segmentation_epoch']}")
     if metrics.get("stopped_early"):
         print(f"stopped early after {metrics['epochs_trained']} epochs: {metrics['stop_reason']}")
     print(f"final loss: {metrics['final_loss']:.6f}")

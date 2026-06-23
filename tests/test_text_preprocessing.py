@@ -97,6 +97,146 @@ def test_preprocess_dataset_text_can_enumerate_base_occurrences(tmp_path):
     assert labels["labels"] == ["verse 1", "chorus", "verse 2", "verse 3"]
 
 
+def test_preprocess_dataset_text_random_annotation_processing_encodes_union(tmp_path):
+    jams_path = tmp_path / "track.jams"
+    _write_repeated_jams(jams_path)
+    track = Track(
+        track_id="track",
+        audio_path=tmp_path / "track.wav",
+        jams_path=jams_path,
+        dataset="dataset",
+    )
+
+    results = preprocess_dataset_text(
+        tracks=[track],
+        output_root=tmp_path / "text",
+        text_encoder_name="placeholder",
+        text_encoder_params={"output_dim": 4},
+        annotation_processing={
+            "policy": "random",
+            "choices": ["merge", "enumerate_consecutive_repeats"],
+        },
+    )
+
+    labels = json.loads((Path(results[0].output_dir) / "labels.json").read_text(encoding="utf-8"))
+    assert labels["labels"] == ["verse", "chorus", "verse 1", "verse 2", "verse 3"]
+
+
+def test_preprocess_dataset_text_can_use_descriptive_music_structure_prompts(tmp_path):
+    jams_path = tmp_path / "track.jams"
+    _write_numbered_repeated_jams(jams_path)
+    track = Track(
+        track_id="track",
+        audio_path=tmp_path / "track.wav",
+        jams_path=jams_path,
+        dataset="dataset",
+    )
+
+    results = preprocess_dataset_text(
+        tracks=[track],
+        output_root=tmp_path / "text",
+        text_encoder_name="placeholder",
+        text_encoder_params={"output_dim": 4},
+        prompt={"mode": "descriptive", "normalize_whitespace": True},
+        label_normalization={"name": "harmonix", "normalize_whitespace": True},
+        annotation_processing={"policy": "enumerate_base_occurrences"},
+    )
+
+    labels = json.loads((Path(results[0].output_dir) / "labels.json").read_text(encoding="utf-8"))
+    assert labels["prompts"][0] == (
+        "Music structure label: verse 1. Base type: verse. "
+        "Occurrence: the 1st verse section in chronological order. "
+        "Meaning: a recurring lyrical section, usually distinct from the chorus. "
+        "Use this label for frames belonging to this section."
+    )
+
+
+def test_preprocess_dataset_text_uses_bare_prompt_mode_by_default(tmp_path):
+    jams_path = tmp_path / "track.jams"
+    _write_numbered_repeated_jams(jams_path)
+    track = Track(
+        track_id="track",
+        audio_path=tmp_path / "track.wav",
+        jams_path=jams_path,
+        dataset="dataset",
+    )
+
+    results = preprocess_dataset_text(
+        tracks=[track],
+        output_root=tmp_path / "text",
+        text_encoder_name="placeholder",
+        text_encoder_params={"output_dim": 4},
+        label_normalization={"name": "harmonix", "normalize_whitespace": True},
+        annotation_processing={"policy": "enumerate_base_occurrences"},
+    )
+
+    labels = json.loads((Path(results[0].output_dir) / "labels.json").read_text(encoding="utf-8"))
+    metadata = json.loads((Path(results[0].output_dir) / "metadata.json").read_text(encoding="utf-8"))
+    assert labels["prompts"][:2] == ["verse 1", "chorus"]
+    assert metadata["prompt"]["mode"] == "bare"
+
+
+def test_preprocess_dataset_text_can_use_compact_prompt_mode(tmp_path):
+    jams_path = tmp_path / "track.jams"
+    _write_numbered_repeated_jams(jams_path)
+    track = Track(
+        track_id="track",
+        audio_path=tmp_path / "track.wav",
+        jams_path=jams_path,
+        dataset="dataset",
+    )
+
+    results = preprocess_dataset_text(
+        tracks=[track],
+        output_root=tmp_path / "text",
+        text_encoder_name="placeholder",
+        text_encoder_params={"output_dim": 4},
+        prompt={"mode": "compact"},
+        label_normalization={"name": "harmonix", "normalize_whitespace": True},
+        annotation_processing={"policy": "enumerate_base_occurrences"},
+    )
+
+    labels = json.loads((Path(results[0].output_dir) / "labels.json").read_text(encoding="utf-8"))
+    assert labels["prompts"][:2] == [
+        "Music structure label: verse 1",
+        "Music structure label: chorus",
+    ]
+
+
+def test_preprocess_dataset_text_can_use_occurrence_descriptive_prompt_mode(tmp_path):
+    jams_path = tmp_path / "track.jams"
+    _write_numbered_repeated_jams(jams_path)
+    track = Track(
+        track_id="track",
+        audio_path=tmp_path / "track.wav",
+        jams_path=jams_path,
+        dataset="dataset",
+    )
+
+    results = preprocess_dataset_text(
+        tracks=[track],
+        output_root=tmp_path / "text",
+        text_encoder_name="placeholder",
+        text_encoder_params={"output_dim": 4},
+        prompt={"mode": "occurrence_descriptive"},
+        label_normalization={"name": "harmonix", "normalize_whitespace": True},
+        annotation_processing={"policy": "enumerate_base_occurrences"},
+    )
+
+    labels = json.loads((Path(results[0].output_dir) / "labels.json").read_text(encoding="utf-8"))
+    assert labels["prompts"][:2] == [
+        (
+            "Music structure label: verse 1. Meaning: the first occurrence of "
+            "the verse section in this song. Use this label for frames belonging "
+            "to the first occurrence of the verse section in this song."
+        ),
+        (
+            "Music structure label: chorus. Meaning: the chorus section. "
+            "Use this label for frames belonging to the chorus section."
+        ),
+    ]
+
+
 def _write_jams(path: Path) -> None:
     jam = jams.JAMS()
     jam.file_metadata.duration = 4.0
