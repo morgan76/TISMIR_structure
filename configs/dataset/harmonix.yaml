@@ -1,0 +1,27 @@
+# Harmonix Set — Western pop/EDM structure dataset (912 tracks).
+name: harmonix
+display_name: Harmonix Set
+description: >
+  912 Western pop/EDM tracks with section, beat and downbeat annotations.
+  JAMS files are provided directly and use the segment_open namespace this
+  project consumes.
+homepage: https://github.com/urinieto/harmonixset
+license: See repository LICENSE (Harmonix Set, Nieto et al., ISMIR 2019).
+audio_included: false
+audio_note: >
+  Audio is not distributed for copyright reasons. The repository provides
+  dataset/youtube_urls.csv plus notebooks/Audio Alignment.ipynb to fetch
+  YouTube audio (e.g. with yt-dlp) and DTW-align it to the annotation
+  timeline; see dataset/youtube_alignment_scores.csv for match quality.
+
+steps:
+  - kind: git
+    url: https://github.com/urinieto/harmonixset.git
+    dest: harmonix
+
+# Assembling a manifest once audio has been sourced and converted to WAV.
+manifest:
+  audio_dir: harmonix/audio          # user-provided after YouTube sourcing
+  jams_dir: harmonix/dataset/jams
+  audio_ext: .wav
+  jams_ext: .jams
