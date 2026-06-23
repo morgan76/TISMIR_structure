@@ -87,6 +87,13 @@ def main() -> None:
         help="Seconds to sleep between requests (politeness / throttling avoidance).",
     )
     parser.add_argument(
+        "--remote-components",
+        default="ejs:github",
+        help="yt-dlp --remote-components value. Required for current YouTube: it fetches "
+        "the EJS challenge-solver script. Needs a JS runtime (e.g. Deno) on PATH. "
+        "Pass empty string to disable.",
+    )
+    parser.add_argument(
         "--urls-csv",
         type=Path,
         default=None,
@@ -183,6 +190,8 @@ def download_one(
         "--no-warnings",
         "-o", str(dest / f"{file_id}.%(ext)s"),
     ]
+    if args.remote_components:
+        cmd += ["--remote-components", args.remote_components]
     if args.cookies is not None:
         cmd += ["--cookies", str(args.cookies)]
     if args.cookies_from_browser is not None:
