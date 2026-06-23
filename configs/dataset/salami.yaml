@@ -1,0 +1,31 @@
+# SALAMI — Structural Analysis of Large Amounts of Music Information.
+name: salami
+display_name: SALAMI
+description: >
+  Public SALAMI structural annotations (1359 annotation sets). Each
+  annotations/<id>/ folder holds raw textfile1/textfile2 plus a parsed/
+  directory with functional (Verse/Chorus/...), uppercase and lowercase
+  hierarchical label files; times are in seconds.
+homepage: https://github.com/DDMAL/salami-data-public
+license: >
+  No explicit LICENSE in the repo; cite Smith et al., ISMIR 2011
+  ("Design and creation of a large-scale database of structural annotations").
+audio_included: false
+audio_note: >
+  Audio is not distributed. metadata/id_index_*.csv map each id to its source
+  collection (codaich, internetarchive, isophonics, rwc). The Internet Archive
+  subset (live recordings) is freely fetchable via id_index_internetarchive.csv;
+  the Codaich/iTunes portion is not redistributable.
+
+steps:
+  - kind: git
+    url: https://github.com/DDMAL/salami-data-public.git
+    dest: salami
+
+manifest:
+  # SALAMI annotations are not JAMS; convert parsed/*_functions.txt to
+  # segment_open JAMS before building a manifest.
+  jams_dir: salami/jams            # user-generated
+  audio_dir: salami/audio          # user-provided
+  audio_ext: .mp3
+  jams_ext: .jams
