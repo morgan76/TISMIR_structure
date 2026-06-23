@@ -17,3 +17,4 @@ outputs/
 checkpoints/
 *.nbc
 *.nbi
+CLAUDE.md
