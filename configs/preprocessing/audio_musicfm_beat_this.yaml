@@ -1,0 +1,25 @@
+dataset_manifest: data/manifests/example.jsonl
+output_root: data/embeddings/audio
+
+audio_encoder:
+  name: musicfm
+  # Download from https://github.com/minzwon/musicfm (not on PyPI):
+  stat_path: /path/to/musicfm/data/msd_stats.json
+  model_path: /path/to/musicfm/data/pretrained_msd.pt
+  layer: 7
+  device: cpu
+  is_flash: false
+  max_seconds: null
+
+beat_tracker:
+  name: beat_this
+  checkpoint_path: final0
+  device: cpu
+  dbn: false
+  float16: false
+
+pooling:
+  method: mean
+  empty: nearest
+  keep_dense: true
+  final_interval: track_duration
