@@ -21,9 +21,11 @@ from tismir.data.annotations import (
 from tismir.losses import (
     audio_audio_supervised_contrastive,
     audio_to_text_infonce,
+    boundary_prediction_loss,
     cross_similarity_matching_loss,
     frame_label_cross_entropy,
     pairwise_probability_loss,
+    pairwise_structure_relation_loss,
     token_uniformity_loss,
     text_to_audio_infonce,
 )
@@ -47,7 +49,10 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output_dir / "checkpoint.pt"
     best_checkpoint_path = output_dir / "best_checkpoint.pt" if validation_dataset is not None else None
-    segmentation_validation = _segmentation_validation_config(config.get("validation"))
+    segmentation_validation = _segmentation_validation_config(
+        config.get("validation"),
+        model_config=config.get("model", {}),
+    )
     best_segmentation_checkpoint_path = (
         output_dir / str(segmentation_validation["checkpoint_name"])
         if validation_dataset is not None and segmentation_validation["enabled"]
@@ -120,6 +125,8 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
             audio = batch["audio"].to(device)
             text = batch["text"].to(device)
             targets = batch["targets"].to(device)
+            base_targets = batch["base_targets"].to(device)
+            segment_targets = batch["segment_targets"].to(device)
             mask = batch["mask"].to(device)
 
             loss, loss_components = _compute_loss(
@@ -127,6 +134,8 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
                 audio=audio,
                 text=text,
                 targets=targets,
+                base_targets=base_targets,
+                segment_targets=segment_targets,
                 mask=mask,
                 ignore_index=ignore_index,
                 loss_config=loss_config,
@@ -164,6 +173,7 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
             record[f"loss_{name}"] = total / max(epoch_items, 1)
         message = f"epoch={epoch + 1}/{max_epochs} loss={mean_loss:.6f}"
         if validation_dataset is not None:
+            segmentation_improved = False
             val_loss, val_components = _evaluate_loss(
                 model=model,
                 dataset=validation_dataset,
@@ -194,13 +204,18 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
                     record[f"val_segmentation_{name}"] = value
                 monitor = str(segmentation_validation["monitor"])
                 monitor_score = segmentation["metrics"][monitor]
-                message += f" val_{_short_metric_name(monitor)}={monitor_score:.6f}"
+                for name in _segmentation_display_metrics(
+                    config=segmentation_validation,
+                    metrics=segmentation["metrics"],
+                ):
+                    message += f" val_{_short_metric_name(name)}={segmentation['metrics'][name]:.6f}"
                 if _is_metric_improvement(
                     current=monitor_score,
                     best=best_segmentation_score,
                     mode=str(segmentation_validation["mode"]),
                     min_delta=float(segmentation_validation["min_delta"]),
                 ):
+                    segmentation_improved = True
                     best_segmentation_score = monitor_score
                     best_segmentation_epoch = epoch
                     torch.save(
@@ -229,13 +244,16 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
                     best_checkpoint_path,
                 )
                 message += " best"
+            elif segmentation_improved and early_stopping["reset_on_segmentation_improvement"]:
+                epochs_without_improvement = 0
             elif early_stopping["patience"] is not None:
                 epochs_without_improvement += 1
                 message += f" patience={epochs_without_improvement}/{early_stopping['patience']}"
                 if epochs_without_improvement >= early_stopping["patience"]:
                     stopped_early = True
                     stop_reason = (
-                        f"validation loss did not improve for {early_stopping['patience']} epochs"
+                        "neither validation loss nor monitored segmentation metric improved "
+                        f"for {early_stopping['patience']} epochs"
                     )
                     record["stopped_early"] = True
             if lr_scheduler is not None:
@@ -313,7 +331,7 @@ def _checkpoint_payload(
     }
 
 
-def _segmentation_validation_config(value: Any) -> dict[str, Any]:
+def _segmentation_validation_config(value: Any, model_config: dict[str, Any] | None = None) -> dict[str, Any]:
     if value is None:
         value = {}
     if not isinstance(value, dict):
@@ -332,7 +350,14 @@ def _segmentation_validation_config(value: Any) -> dict[str, Any]:
     metrics = tuple(
         segmentation.get(
             "metrics",
-            ("F-measure@0.5", "F-measure@3.0", "Pairwise F-measure", "NCE F-measure"),
+            (
+                "F-measure@0.5",
+                "F-measure@3.0",
+                "Acc",
+                "Balanced Acc",
+                "Pairwise F-measure",
+                "NCE F-measure",
+            ),
         )
     )
     if monitor not in metrics:
@@ -345,15 +370,19 @@ def _segmentation_validation_config(value: Any) -> dict[str, Any]:
         limit = int(limit)
         if limit < 1:
             raise ValueError("validation.segmentation.limit must be positive")
-    smoothing_window = int(segmentation.get("smoothing_window", 1))
+    smoothing_window = int(segmentation.get("smoothing_window", 7))
     if smoothing_window < 1:
         raise ValueError("validation.segmentation.smoothing_window must be positive")
-    transition_penalty = float(segmentation.get("transition_penalty", 0.0))
+    transition_penalty = float(segmentation.get("transition_penalty", 8.0))
     if transition_penalty < 0:
         raise ValueError("validation.segmentation.transition_penalty must be non-negative")
     min_segment_duration = float(segmentation.get("min_segment_duration", 0.0))
     if min_segment_duration < 0:
         raise ValueError("validation.segmentation.min_segment_duration must be non-negative")
+    boundary_decoding = _boundary_decoding_config(
+        segmentation.get("boundary_decoding"),
+        model_config=model_config,
+    )
 
     return {
         "enabled": True,
@@ -361,15 +390,64 @@ def _segmentation_validation_config(value: Any) -> dict[str, Any]:
         "mode": mode,
         "min_delta": float(segmentation.get("min_delta", 0.0)),
         "metrics": metrics,
+        "display_metrics": tuple(
+            segmentation.get(
+                "display_metrics",
+                (
+                    "F-measure@0.5",
+                    "F-measure@3.0",
+                    "Acc",
+                    "Balanced Acc",
+                    "Pairwise F-measure",
+                    "NCE F-measure",
+                ),
+            )
+        ),
         "limit": limit,
         "smoothing_window": smoothing_window,
         "smoothing_mode": str(segmentation.get("smoothing_mode", "mean")),
-        "decoder": str(segmentation.get("decoder", "argmax")),
+        "decoder": str(segmentation.get("decoder", "viterbi")),
         "transition_penalty": transition_penalty,
+        "boundary_decoding": boundary_decoding,
         "min_segment_duration": min_segment_duration,
         "trim": bool(segmentation.get("trim", True)),
         "checkpoint_name": str(segmentation.get("checkpoint_name", "best_segmentation_checkpoint.pt")),
     }
+
+
+def _boundary_decoding_config(value: Any, model_config: dict[str, Any] | None) -> dict[str, Any]:
+    head_enabled = _model_boundary_head_enabled(model_config or {})
+    if value in (None, "auto"):
+        value = {"enabled": head_enabled}
+    elif value is True:
+        value = {"enabled": True}
+    elif value is False:
+        value = {"enabled": False}
+    elif not isinstance(value, dict):
+        raise TypeError("validation.segmentation.boundary_decoding must be a mapping, boolean, 'auto', or null")
+
+    enabled = bool(value.get("enabled", head_enabled)) and head_enabled
+    weight = float(value.get("weight", 1.0))
+    if weight < 0:
+        raise ValueError("validation.segmentation.boundary_decoding.weight must be non-negative")
+    eps = float(value.get("eps", 1e-4))
+    if not 0.0 < eps < 0.5:
+        raise ValueError("validation.segmentation.boundary_decoding.eps must be between 0 and 0.5")
+    return {
+        "enabled": enabled,
+        "weight": weight,
+        "eps": eps,
+    }
+
+
+def _model_boundary_head_enabled(model_config: dict[str, Any]) -> bool:
+    update_blocks = model_config.get("update_blocks", model_config.get("cross_attention", {}))
+    if not isinstance(update_blocks, dict):
+        return False
+    boundary_head = update_blocks.get("boundary_head", False)
+    if isinstance(boundary_head, dict):
+        return bool(boundary_head.get("enabled", True))
+    return bool(boundary_head)
 
 
 def _is_metric_improvement(
@@ -388,14 +466,36 @@ def _is_metric_improvement(
 
 
 def _short_metric_name(metric: str) -> str:
+    aliases = {
+        "Pairwise F-measure": "PFC",
+        "NCE F-measure": "NCE",
+    }
+    if metric in aliases:
+        return aliases[metric]
     return metric.replace(" ", "_").replace("F-measure", "F").replace("@", "at")
+
+
+def _segmentation_display_metrics(config: dict[str, Any], metrics: dict[str, float]) -> list[str]:
+    names: list[str] = []
+    for name in (*config.get("display_metrics", ()), str(config["monitor"])):
+        if name in metrics and name not in names:
+            names.append(name)
+    return names
 
 
 def _early_stopping_config(value: Any) -> dict[str, Any]:
     if value in (None, False):
-        return {"patience": None, "min_delta": 0.0}
+        return {
+            "patience": None,
+            "min_delta": 0.0,
+            "reset_on_segmentation_improvement": True,
+        }
     if value is True:
-        return {"patience": 10, "min_delta": 0.0}
+        return {
+            "patience": 10,
+            "min_delta": 0.0,
+            "reset_on_segmentation_improvement": True,
+        }
     if not isinstance(value, dict):
         raise TypeError("optimization.early_stopping must be a mapping, boolean, or null")
     patience = value.get("patience")
@@ -406,7 +506,13 @@ def _early_stopping_config(value: Any) -> dict[str, Any]:
     min_delta = float(value.get("min_delta", 0.0))
     if min_delta < 0:
         raise ValueError("optimization.early_stopping.min_delta must be non-negative")
-    return {"patience": patience, "min_delta": min_delta}
+    return {
+        "patience": patience,
+        "min_delta": min_delta,
+        "reset_on_segmentation_improvement": bool(
+            value.get("reset_on_segmentation_improvement", True)
+        ),
+    }
 
 
 def _build_lr_scheduler(value: Any, optimizer, torch, has_validation: bool):
@@ -491,6 +597,11 @@ def _print_model_summary(
         f"  parameter memory: {param_memory_mb:.2f} MB (float32 estimate)",
     ]
 
+    architecture_lines = _architecture_summary_lines(model)
+    if architecture_lines:
+        lines.append("  architecture:")
+        lines.extend(architecture_lines)
+
     module_lines = _module_summary_lines(
         model,
         depth=int(config["depth"]),
@@ -521,6 +632,55 @@ def _model_summary_config(value: Any) -> dict[str, Any]:
         "depth": depth,
         "max_lines": max_lines,
     }
+
+
+def _architecture_summary_lines(model) -> list[str]:
+    lines: list[str] = []
+    if bool(getattr(model, "bidirectional_cross_attention", False)):
+        audio_adapter_layers = _transformer_layer_count(getattr(model, "audio_adapter", None))
+        text_adapter_layers = _transformer_layer_count(getattr(model, "text_adapter", None))
+        update_blocks = getattr(model, "cross_attention_blocks", None)
+        update_count = 0 if update_blocks is None else len(update_blocks)
+        update_section_layers = None
+        update_frame_layers = None
+        if update_count:
+            first_block = update_blocks[0]
+            update_section_layers = _transformer_layer_count(
+                getattr(first_block, "section_branch", None)
+            )
+            update_frame_layers = _transformer_layer_count(
+                getattr(first_block, "frame_branch", None)
+            )
+        lines.extend(
+            [
+                "    bidirectional section-conditioned audio model",
+                f"    audio adapter self-attention layers: {audio_adapter_layers}",
+                f"    text adapter self-attention layers: {text_adapter_layers}",
+                "    init: sections <- audio",
+                f"    update blocks: {update_count}",
+                "    update order: audio <- sections, link-aware audio update, sections <- audio, section self-attention",
+                "    link input channels: frame-label probability similarity and audio cosine",
+                "    output: frame-label similarity from final audio and section tokens",
+            ]
+        )
+        if update_section_layers is not None:
+            lines.append(
+                "    section self-attention layers per update block: "
+                f"{update_section_layers}"
+            )
+        if update_frame_layers is not None:
+            lines.append(
+                "    audio relation/self-attention layers per update block: "
+                f"{update_frame_layers}"
+            )
+    return lines
+
+
+def _transformer_layer_count(module) -> int:
+    layers = getattr(module, "layers", None)
+    if layers is not None:
+        return len(layers)
+    return 0 if module is None else 1
 
 
 def _module_summary_lines(model, depth: int, max_lines: int) -> list[str]:
@@ -623,12 +783,16 @@ def _evaluate_loss(
             audio = batch["audio"].to(device)
             text = batch["text"].to(device)
             targets = batch["targets"].to(device)
+            base_targets = batch["base_targets"].to(device)
+            segment_targets = batch["segment_targets"].to(device)
             mask = batch["mask"].to(device)
             loss, components = _compute_loss(
                 model=model,
                 audio=audio,
                 text=text,
                 targets=targets,
+                base_targets=base_targets,
+                segment_targets=segment_targets,
                 mask=mask,
                 ignore_index=ignore_index,
                 loss_config=loss_config,
@@ -676,7 +840,15 @@ def _evaluate_segmentation(
             example = dataset[index]
             audio = torch.from_numpy(example.audio).unsqueeze(0).to(device)
             text = torch.from_numpy(example.text).to(device)
-            logits = model(audio, text)[0].detach().cpu().numpy()
+            boundary_probabilities = None
+            if bool(config["boundary_decoding"]["enabled"]):
+                if not hasattr(model, "extract_features"):
+                    raise ValueError("boundary decoding requires a model with extract_features()")
+                features = model.extract_features(audio, text)
+                logits = features["logits"][0].detach().cpu().numpy()
+                boundary_probabilities = _boundary_probabilities_from_features(features)
+            else:
+                logits = model(audio, text)[0].detach().cpu().numpy()
             decoded_logits = smooth_logits(
                 logits,
                 window=int(config["smoothing_window"]),
@@ -686,6 +858,18 @@ def _evaluate_segmentation(
                 decoded_logits,
                 strategy=str(config["decoder"]),
                 transition_penalty=float(config["transition_penalty"]),
+                boundary_probabilities=boundary_probabilities,
+                boundary_weight=(
+                    float(config["boundary_decoding"]["weight"])
+                    if boundary_probabilities is not None
+                    else 0.0
+                ),
+                boundary_eps=float(config["boundary_decoding"]["eps"]),
+            )
+            frame_scores = _frame_label_accuracy_scores(
+                label_indices,
+                targets=example.targets,
+                ignore_index=ignore_index,
             )
             predicted_labels = [example.labels[int(label_index)] for label_index in label_indices]
             predicted_segments = merge_frame_labels(example.beat_intervals, predicted_labels)
@@ -725,7 +909,10 @@ def _evaluate_segmentation(
                 trim=bool(config["trim"]),
             )
             for name in metric_names:
-                metric_values[name].append(float(scores[name]))
+                if name in frame_scores:
+                    metric_values[name].append(float(frame_scores[name]))
+                else:
+                    metric_values[name].append(float(scores[name]))
 
     model.train()
     if not any(metric_values.values()):
@@ -736,6 +923,37 @@ def _evaluate_segmentation(
             name: float(np.nanmean(values)) if values else float("nan")
             for name, values in metric_values.items()
         },
+    }
+
+
+def _boundary_probabilities_from_features(features: dict[str, Any]) -> np.ndarray | None:
+    boundary_logits = features.get("boundary_logits")
+    if not boundary_logits:
+        return None
+    logits = boundary_logits[-1][0].detach().cpu().numpy().astype(np.float64)
+    return 1.0 / (1.0 + np.exp(-logits))
+
+
+def _frame_label_accuracy_scores(
+    predictions: np.ndarray,
+    targets: np.ndarray,
+    ignore_index: int,
+) -> dict[str, float]:
+    targets = targets.astype(np.int64, copy=False)
+    predictions = predictions.astype(np.int64, copy=False)
+    valid = targets != ignore_index
+    if not np.any(valid):
+        return {"Acc": float("nan"), "Balanced Acc": float("nan")}
+
+    valid_predictions = predictions[valid]
+    valid_targets = targets[valid]
+    per_label_acc = [
+        float(np.mean(valid_predictions[valid_targets == label_index] == label_index))
+        for label_index in np.unique(valid_targets)
+    ]
+    return {
+        "Acc": float(np.mean(valid_predictions == valid_targets)),
+        "Balanced Acc": float(np.mean(per_label_acc)) if per_label_acc else float("nan"),
     }
 
 
@@ -780,6 +998,8 @@ def _compute_loss(
     audio,
     text,
     targets,
+    base_targets,
+    segment_targets,
     mask,
     ignore_index: int,
     loss_config: dict[str, Any],
@@ -845,6 +1065,65 @@ def _compute_loss(
         )
         components["pairwise_probability"] = pair_loss.detach()
         weighted_terms.append(float(pairwise_probability_config["weight"]) * pair_loss)
+
+    structure_pairwise_config = loss_config["structure_pairwise"]
+    if structure_pairwise_config["weight"]:
+        structure_tokens = features.get("structure_tokens") if features is not None else None
+        if structure_tokens is None:
+            raise ValueError(
+                "structure_pairwise loss requires model.structure_head.enabled=true"
+            )
+        if not hasattr(model, "structure_pair_logits"):
+            raise ValueError("structure_pairwise loss requires a model with structure_pair_logits()")
+        structure_loss = pairwise_structure_relation_loss(
+            model.structure_pair_logits(structure_tokens),
+            base_targets,
+            segment_targets,
+            ignore_index=ignore_index,
+            balance=bool(structure_pairwise_config["balance"]),
+        )
+        components["structure_pairwise"] = structure_loss.detach()
+        weighted_terms.append(float(structure_pairwise_config["weight"]) * structure_loss)
+
+    link_relation_config = loss_config["link_relation"]
+    if link_relation_config["weight"]:
+        link_logits = features.get("link_logits") if features is not None else None
+        if not link_logits:
+            raise ValueError(
+                "link_relation loss requires model.update_blocks.relation_attention.enabled=true"
+            )
+        link_losses = [
+            pairwise_structure_relation_loss(
+                block_logits,
+                targets,
+                segment_targets,
+                ignore_index=ignore_index,
+                balance=bool(link_relation_config["balance"]),
+            )
+            for block_logits in link_logits
+        ]
+        link_loss = sum(link_losses) / len(link_losses)
+        components["link_relation"] = link_loss.detach()
+        weighted_terms.append(float(link_relation_config["weight"]) * link_loss)
+
+    boundary_config = loss_config["boundary"]
+    if boundary_config["weight"]:
+        boundary_logits = features.get("boundary_logits") if features is not None else None
+        if not boundary_logits:
+            raise ValueError(
+                "boundary loss requires model.update_blocks.boundary_head.enabled=true"
+            )
+        boundary_losses = [
+            boundary_prediction_loss(
+                block_logits,
+                segment_targets,
+                ignore_index=ignore_index,
+            )
+            for block_logits in boundary_logits
+        ]
+        boundary_loss = sum(boundary_losses) / len(boundary_losses)
+        components["boundary"] = boundary_loss.detach()
+        weighted_terms.append(float(boundary_config["weight"]) * boundary_loss)
 
     intermediate_config = loss_config["intermediate_frame_label"]
     if intermediate_config["weight"]:
@@ -987,6 +1266,9 @@ def _loss_config(value: Any) -> dict[str, Any]:
         "text_to_audio": _contrastive_term_config(value.get("text_to_audio"), default_weight=0.0),
         "audio_to_audio": _contrastive_term_config(value.get("audio_to_audio"), default_weight=0.0),
         "pairwise_probability": _pairwise_probability_config(value.get("pairwise_probability")),
+        "structure_pairwise": _pairwise_probability_config(value.get("structure_pairwise")),
+        "link_relation": _pairwise_probability_config(value.get("link_relation")),
+        "boundary": _simple_weight_config(value.get("boundary")),
         "intermediate_frame_label": _simple_weight_config(value.get("intermediate_frame_label")),
         "cross_attention_alignment": _cross_attention_alignment_config(
             value.get("cross_attention_alignment")
@@ -1020,6 +1302,9 @@ def _has_auxiliary_losses(loss_config: dict[str, Any]) -> bool:
             "audio_to_text",
             "text_to_audio",
             "audio_to_audio",
+            "structure_pairwise",
+            "link_relation",
+            "boundary",
             "intermediate_frame_label",
             "cross_attention_alignment",
             "similarity_matching",

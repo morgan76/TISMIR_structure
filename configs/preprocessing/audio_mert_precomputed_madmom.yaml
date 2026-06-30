@@ -1,0 +1,21 @@
+dataset_manifest: data/manifests/example.jsonl
+output_root: data/embeddings/audio_madmom
+
+audio_encoder:
+  name: mert
+  checkpoint: m-a-p/MERT-v1-95M
+  layer: -1
+  device: cpu
+  max_seconds: null
+  trust_remote_code: true
+
+beat_tracker:
+  name: precomputed
+  root: outputs/beat_diagnostics/harmonix_madmom/estimates
+  dataset: harmonix
+
+pooling:
+  method: mean
+  empty: nearest
+  keep_dense: false
+  final_interval: track_duration

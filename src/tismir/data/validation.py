@@ -5,8 +5,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from tismir.data.annotations import process_sections
-from tismir.data.jams import load_structure_sections
+from tismir.data.jams import load_processed_structure_sections
 from tismir.data.schemas import Section, Track
 
 
@@ -62,8 +61,11 @@ def validate_track(
 
     sections: list[Section] = []
     try:
-        sections = load_structure_sections(track.jams_path, namespace=namespace)
-        sections = process_sections(sections, annotation_processing=annotation_processing)
+        sections = load_processed_structure_sections(
+            track.jams_path,
+            namespace=namespace,
+            annotation_processing=annotation_processing,
+        )
     except Exception as exc:  # pragma: no cover - specific exception types vary by JAMS
         errors.append(f"Could not load JAMS sections: {exc}")
 

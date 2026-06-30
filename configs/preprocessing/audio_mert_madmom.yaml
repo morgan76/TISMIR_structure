@@ -1,10 +1,13 @@
 dataset_manifest: data/manifests/example.jsonl
-output_root: data/embeddings/audio
+output_root: data/embeddings/audio_madmom
 
 audio_encoder:
-  name: placeholder
-  output_dim: 16
-  frame_rate: 2.0
+  name: mert
+  checkpoint: m-a-p/MERT-v1-95M
+  layer: -1
+  device: cpu
+  max_seconds: null
+  trust_remote_code: true
 
 beat_tracker:
   name: madmom
@@ -17,5 +20,5 @@ beat_tracker:
 pooling:
   method: mean
   empty: nearest
-  keep_dense: true
+  keep_dense: false
   final_interval: track_duration

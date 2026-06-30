@@ -14,6 +14,7 @@ if not os.environ.get("LOKY_MAX_CPU_COUNT"):
 
 import numpy as np
 
+from tismir.decoding.segments import decode_label_indices, smooth_logits
 from tismir.models import build_model
 from tismir.training.data import StructureEmbeddingDataset
 
@@ -32,8 +33,17 @@ def run_diagnostics(
     limit: int | None = None,
     candidate_label_strategy: str = "track_labels",
     annotation_processing: str | dict[str, Any] | None = None,
+    beat_subsampling: bool | dict[str, Any] | None = None,
+    track_filter: bool | dict[str, Any] | None = None,
     max_plots: int = 20,
     audio_audio_max_frames: int = 512,
+    smoothing_window: int | None = None,
+    smoothing_mode: str | None = None,
+    decoder: str | None = None,
+    transition_penalty: float | None = None,
+    boundary_decoding: bool | dict[str, Any] | str | None = None,
+    boundary_weight: float | None = None,
+    boundary_eps: float | None = None,
 ) -> list[dict[str, Any]]:
     """Run token-similarity diagnostics over a manifest."""
 
@@ -43,6 +53,20 @@ def run_diagnostics(
     config = checkpoint["config"]
     if annotation_processing is None:
         annotation_processing = config.get("data", {}).get("annotation_processing")
+    if beat_subsampling is None:
+        beat_subsampling = config.get("data", {}).get("beat_subsampling")
+    if track_filter is None:
+        track_filter = config.get("data", {}).get("track_filter")
+    decoding_config = _diagnostic_decoding_config(
+        checkpoint_config=config,
+        smoothing_window=smoothing_window,
+        smoothing_mode=smoothing_mode,
+        decoder=decoder,
+        transition_penalty=transition_penalty,
+        boundary_decoding=boundary_decoding,
+        boundary_weight=boundary_weight,
+        boundary_eps=boundary_eps,
+    )
 
     dataset = StructureEmbeddingDataset(
         manifest=manifest,
@@ -54,6 +78,8 @@ def run_diagnostics(
         namespace=namespace,
         candidate_label_strategy=candidate_label_strategy,
         annotation_processing=annotation_processing,
+        beat_subsampling=beat_subsampling,
+        track_filter=track_filter,
         ignore_index=int(config.get("data", {}).get("ignore_index", -100)),
     )
 
@@ -75,6 +101,11 @@ def run_diagnostics(
             features = model.extract_features(audio, text)
 
         audio_tokens = features["audio_tokens"][0].detach().cpu().numpy().astype(np.float32)
+        structure_tokens = None
+        if features.get("structure_tokens") is not None:
+            structure_tokens = (
+                features["structure_tokens"][0].detach().cpu().numpy().astype(np.float32)
+            )
         text_tokens = features["text_tokens"].detach().cpu().numpy().astype(np.float32)
         if text_tokens.ndim == 3:
             text_tokens = text_tokens[0]
@@ -82,10 +113,36 @@ def run_diagnostics(
         logits = features["logits"][0].detach().cpu().numpy().astype(np.float32)
         probabilities = _softmax(logits, axis=-1).astype(np.float32)
         predictions = logits.argmax(axis=-1).astype(np.int64)
+        boundary_logits = _last_boundary_logits(features)
+        boundary_probabilities = None if boundary_logits is None else _sigmoid(boundary_logits)
+        decoded_logits = smooth_logits(
+            logits,
+            window=int(decoding_config["smoothing_window"]),
+            mode=str(decoding_config["smoothing_mode"]),
+        )
+        decoded_predictions = decode_label_indices(
+            decoded_logits,
+            strategy=str(decoding_config["decoder"]),
+            transition_penalty=float(decoding_config["transition_penalty"]),
+            boundary_probabilities=boundary_probabilities,
+            boundary_weight=(
+                float(decoding_config["boundary_decoding"]["weight"])
+                if bool(decoding_config["boundary_decoding"]["enabled"])
+                and boundary_probabilities is not None
+                else 0.0
+            ),
+            boundary_eps=float(decoding_config["boundary_decoding"]["eps"]),
+        ).astype(np.int64)
 
         text_text = _cosine_matrix(text_tokens, text_tokens)
         audio_indices = _sample_indices(len(audio_tokens), max_count=audio_audio_max_frames)
         audio_audio = _cosine_matrix(audio_tokens[audio_indices], audio_tokens[audio_indices])
+        structure_audio_audio = None
+        if structure_tokens is not None:
+            structure_audio_audio = _cosine_matrix(
+                structure_tokens[audio_indices],
+                structure_tokens[audio_indices],
+            )
         probability_self = (probabilities[audio_indices] @ probabilities[audio_indices].T).astype(np.float32)
         probability_reference = _same_label_matrix(
             example.targets[audio_indices],
@@ -97,8 +154,10 @@ def run_diagnostics(
             audio_audio_indices=audio_indices,
             audio_text=audio_text,
             probability_self=probability_self,
+            structure_audio_audio=structure_audio_audio,
             targets=example.targets,
             predictions=predictions,
+            decoded_predictions=decoded_predictions,
             ignore_index=int(config.get("data", {}).get("ignore_index", -100)),
         )
 
@@ -109,11 +168,17 @@ def run_diagnostics(
             text_text_similarity=text_text,
             audio_text_similarity=audio_text,
             audio_audio_similarity=audio_audio,
+            **(
+                {}
+                if structure_audio_audio is None
+                else {"structure_audio_audio_similarity": structure_audio_audio}
+            ),
             probability_self_similarity=probability_self,
             probability_reference_similarity=probability_reference,
             audio_audio_indices=audio_indices.astype(np.int64),
             targets=example.targets.astype(np.int64),
             predictions=predictions.astype(np.int64),
+            decoded_predictions=decoded_predictions.astype(np.int64),
             beat_intervals=np.asarray(example.beat_intervals, dtype=np.float32),
             labels=np.asarray(example.labels, dtype=object),
         )
@@ -124,14 +189,17 @@ def run_diagnostics(
                 labels=example.labels,
                 targets=example.targets,
                 predictions=predictions,
+                decoded_predictions=decoded_predictions,
                 audio_tokens=audio_tokens,
                 text_tokens=text_tokens,
                 text_text=text_text,
                 audio_text=audio_text,
                 audio_audio=audio_audio,
+                structure_audio_audio=structure_audio_audio,
                 probability_self=probability_self,
                 probability_reference=probability_reference,
                 audio_audio_indices=audio_indices,
+                beat_intervals=np.asarray(example.beat_intervals, dtype=np.float32),
             )
 
         result = {
@@ -145,7 +213,9 @@ def run_diagnostics(
         results.append(result)
         print(
             f"{example.track_id}: frames={result['num_frames']} labels={result['num_labels']} "
-            f"acc={summary['frame_accuracy']:.3f} gt_margin={summary['audio_text_gt_margin_mean']:.3f}"
+            f"acc={summary['frame_accuracy']:.3f} "
+            f"decoded_acc={summary['decoded_frame_accuracy']:.3f} "
+            f"gt_margin={summary['audio_text_gt_margin_mean']:.3f}"
         )
 
     corpus_summary = _summarize_corpus(results)
@@ -168,13 +238,16 @@ def _summarize_track(
     audio_audio_indices: np.ndarray,
     audio_text: np.ndarray,
     probability_self: np.ndarray,
+    structure_audio_audio: np.ndarray | None,
     targets: np.ndarray,
     predictions: np.ndarray,
+    decoded_predictions: np.ndarray,
     ignore_index: int,
 ) -> dict[str, float]:
     valid = targets != ignore_index
     valid_targets = targets[valid].astype(int)
     valid_predictions = predictions[valid].astype(int)
+    valid_decoded_predictions = decoded_predictions[valid].astype(int)
     offdiag = text_text[~np.eye(len(text_text), dtype=bool)] if len(text_text) > 1 else np.asarray([])
 
     gt_scores = audio_text[valid, valid_targets] if valid.any() else np.asarray([])
@@ -195,13 +268,25 @@ def _summarize_track(
     different_values = audio_audio[valid_pair_mask & offdiag_pair_mask & ~same_mask]
     probability_same_values = probability_self[valid_pair_mask & offdiag_pair_mask & same_mask]
     probability_different_values = probability_self[valid_pair_mask & offdiag_pair_mask & ~same_mask]
+    structure_same_values = np.asarray([])
+    structure_different_values = np.asarray([])
+    if structure_audio_audio is not None:
+        structure_same_values = structure_audio_audio[
+            valid_pair_mask & offdiag_pair_mask & same_mask
+        ]
+        structure_different_values = structure_audio_audio[
+            valid_pair_mask & offdiag_pair_mask & ~same_mask
+        ]
 
     audio_change = 1.0 - np.sum(_normalize_rows(audio_text[:-1]) * _normalize_rows(audio_text[1:]), axis=1)
     boundary_mask = _boundary_mask(targets, ignore_index=ignore_index)
     non_boundary_mask = _non_boundary_mask(targets, ignore_index=ignore_index)
 
-    return {
+    summary = {
         "frame_accuracy": _safe_mean((valid_predictions == valid_targets).astype(float)),
+        "decoded_frame_accuracy": _safe_mean(
+            (valid_decoded_predictions == valid_targets).astype(float)
+        ),
         "text_text_offdiag_mean": _safe_mean(offdiag),
         "text_text_offdiag_max": _safe_max(offdiag),
         "audio_text_gt_score_mean": _safe_mean(gt_scores),
@@ -213,6 +298,16 @@ def _summarize_track(
         "audio_text_change_at_boundary_mean": _safe_mean(audio_change[boundary_mask]),
         "audio_text_change_non_boundary_mean": _safe_mean(audio_change[non_boundary_mask]),
     }
+    if structure_audio_audio is not None:
+        summary.update(
+            {
+                "structure_audio_audio_same_label_mean": _safe_mean(structure_same_values),
+                "structure_audio_audio_different_label_mean": _safe_mean(
+                    structure_different_values
+                ),
+            }
+        )
+    return summary
 
 
 def _save_track_json(path: Path, example, summary: dict[str, float]) -> None:
@@ -233,26 +328,19 @@ def _save_plots(
     labels: list[str],
     targets: np.ndarray,
     predictions: np.ndarray,
+    decoded_predictions: np.ndarray,
     audio_tokens: np.ndarray,
     text_tokens: np.ndarray,
     text_text: np.ndarray,
     audio_text: np.ndarray,
     audio_audio: np.ndarray,
+    structure_audio_audio: np.ndarray | None,
     probability_self: np.ndarray,
     probability_reference: np.ndarray,
     audio_audio_indices: np.ndarray,
+    beat_intervals: np.ndarray,
 ) -> None:
     _set_projection_environment_defaults()
-    _save_svg_plots(
-        track_dir=track_dir,
-        labels=labels,
-        targets=targets,
-        predictions=predictions,
-        text_text=text_text,
-        audio_text=audio_text,
-        audio_audio=audio_audio,
-        audio_audio_indices=audio_audio_indices,
-    )
     try:
         os.environ.setdefault("MPLCONFIGDIR", str(Path(".matplotlib-cache").resolve()))
         import matplotlib.pyplot as plt
@@ -260,6 +348,9 @@ def _save_plots(
         return
 
     boundaries = np.flatnonzero(_boundary_mask(targets, ignore_index=-100)) + 1
+    beat_times = _beat_start_times(beat_intervals)
+    if len(beat_times) != len(targets):
+        beat_times = np.arange(len(targets), dtype=np.float32)
 
     fig, ax = plt.subplots(figsize=(max(7.0, len(labels) * 0.7), max(5.0, len(labels) * 0.55)))
     image = ax.imshow(text_text, vmin=-1.0, vmax=1.0, cmap="coolwarm")
@@ -273,18 +364,19 @@ def _save_plots(
     fig.savefig(track_dir / "text_text_similarity.png", dpi=160)
     plt.close(fig)
 
-    fig = plt.figure(figsize=(17, max(5.5, len(labels) * 0.42 + 1.8)))
+    fig = plt.figure(figsize=(17, max(5.9, len(labels) * 0.42 + 2.15)))
     grid = fig.add_gridspec(
-        nrows=3,
+        nrows=4,
         ncols=2,
         width_ratios=[40, 1],
-        height_ratios=[max(3.0, len(labels) * 0.38), 0.28, 0.28],
+        height_ratios=[max(3.0, len(labels) * 0.38), 0.28, 0.28, 0.28],
         hspace=0.08,
         wspace=0.02,
     )
     ax = fig.add_subplot(grid[0, 0])
     reference_ax = fig.add_subplot(grid[1, 0], sharex=ax)
     prediction_ax = fig.add_subplot(grid[2, 0], sharex=ax)
+    decoded_ax = fig.add_subplot(grid[3, 0], sharex=ax)
     colorbar_ax = fig.add_subplot(grid[0, 1])
 
     image = ax.imshow(
@@ -300,6 +392,7 @@ def _save_plots(
         ax.axvline(boundary - 0.5, color="black", linewidth=0.35, alpha=0.3)
         reference_ax.axvline(boundary - 0.5, color="black", linewidth=0.25, alpha=0.25)
         prediction_ax.axvline(boundary - 0.5, color="black", linewidth=0.25, alpha=0.25)
+        decoded_ax.axvline(boundary - 0.5, color="black", linewidth=0.25, alpha=0.25)
     ax.set_yticks(np.arange(len(labels)))
     ax.set_yticklabels(labels, fontsize=9)
     ax.set_title("Audio-token to text-token similarity")
@@ -309,31 +402,66 @@ def _save_plots(
     label_cmap = _label_colormap(plt, len(labels))
     reference_values = np.where(targets == -100, len(labels), targets)[None, :]
     prediction_values = predictions[None, :]
+    decoded_values = decoded_predictions[None, :]
     reference_ax.imshow(reference_values, aspect="auto", interpolation="nearest", cmap=label_cmap, vmin=-0.5, vmax=len(labels) + 0.5)
     prediction_ax.imshow(prediction_values, aspect="auto", interpolation="nearest", cmap=label_cmap, vmin=-0.5, vmax=len(labels) + 0.5)
+    decoded_ax.imshow(decoded_values, aspect="auto", interpolation="nearest", cmap=label_cmap, vmin=-0.5, vmax=len(labels) + 0.5)
     _annotate_label_strip(reference_ax, targets, labels)
     _annotate_label_strip(prediction_ax, predictions, labels)
+    _annotate_label_strip(decoded_ax, decoded_predictions, labels)
     reference_ax.set_yticks([])
     prediction_ax.set_yticks([])
+    decoded_ax.set_yticks([])
     reference_ax.set_ylabel("ref", rotation=0, ha="right", va="center", fontsize=9)
-    prediction_ax.set_ylabel("pred", rotation=0, ha="right", va="center", fontsize=9)
-    prediction_ax.set_xlabel("beat-synchronous frame")
+    prediction_ax.set_ylabel("raw", rotation=0, ha="right", va="center", fontsize=9)
+    decoded_ax.set_ylabel("decoded", rotation=0, ha="right", va="center", fontsize=9)
+    _set_time_axis(decoded_ax, beat_times, axis="x")
+    decoded_ax.set_xlabel("time (min:ss)")
     reference_ax.tick_params(axis="x", labelbottom=False)
+    prediction_ax.tick_params(axis="x", labelbottom=False)
     fig.savefig(track_dir / "audio_text_similarity.png", dpi=180, bbox_inches="tight")
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(9, 8))
     image = ax.imshow(audio_audio, vmin=-1.0, vmax=1.0, cmap="coolwarm", origin="lower")
+    sampled_times = beat_times[audio_audio_indices]
     sampled_boundary_positions = np.searchsorted(audio_audio_indices, boundaries)
     for boundary in sampled_boundary_positions:
         if 0 <= boundary < len(audio_audio_indices):
             ax.axvline(boundary - 0.5, color="white", linewidth=0.35, alpha=0.55)
             ax.axhline(boundary - 0.5, color="white", linewidth=0.35, alpha=0.55)
     ax.set_title("Audio-token self-similarity")
+    _set_time_axis(ax, sampled_times, axis="x")
+    _set_time_axis(ax, sampled_times, axis="y")
+    ax.set_xlabel("time (min:ss)")
+    ax.set_ylabel("time (min:ss)")
     fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
     fig.savefig(track_dir / "audio_audio_similarity.png", dpi=160)
     plt.close(fig)
+
+    if structure_audio_audio is not None:
+        fig, ax = plt.subplots(figsize=(9, 8))
+        image = ax.imshow(
+            structure_audio_audio,
+            vmin=-1.0,
+            vmax=1.0,
+            cmap="coolwarm",
+            origin="lower",
+        )
+        for boundary in sampled_boundary_positions:
+            if 0 <= boundary < len(audio_audio_indices):
+                ax.axvline(boundary - 0.5, color="white", linewidth=0.35, alpha=0.55)
+                ax.axhline(boundary - 0.5, color="white", linewidth=0.35, alpha=0.55)
+        ax.set_title("Structure-head audio-token self-similarity")
+        _set_time_axis(ax, sampled_times, axis="x")
+        _set_time_axis(ax, sampled_times, axis="y")
+        ax.set_xlabel("time (min:ss)")
+        ax.set_ylabel("time (min:ss)")
+        fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+        fig.tight_layout()
+        fig.savefig(track_dir / "structure_audio_audio_similarity.png", dpi=160)
+        plt.close(fig)
 
     _save_probability_self_plot(
         plt=plt,
@@ -341,6 +469,7 @@ def _save_plots(
         probability_self=probability_self,
         probability_reference=probability_reference,
         audio_audio_indices=audio_audio_indices,
+        sampled_times=sampled_times,
         targets=targets,
     )
     _save_tsne_plot(
@@ -419,12 +548,46 @@ def _annotate_label_strip(ax, values: np.ndarray, labels: list[str], min_width: 
         start = end
 
 
+def _beat_start_times(beat_intervals: np.ndarray) -> np.ndarray:
+    if beat_intervals.size == 0:
+        return np.asarray([], dtype=np.float32)
+    if beat_intervals.ndim != 2 or beat_intervals.shape[1] < 1:
+        return np.arange(len(beat_intervals), dtype=np.float32)
+    return beat_intervals[:, 0].astype(np.float32)
+
+
+def _set_time_axis(ax, times: np.ndarray, axis: str, max_ticks: int = 8) -> None:
+    if len(times) == 0:
+        return
+    tick_count = min(max_ticks, len(times))
+    positions = np.unique(np.linspace(0, len(times) - 1, tick_count).round().astype(int))
+    labels = [_format_timestamp(float(times[position])) for position in positions]
+    if axis == "x":
+        ax.set_xticks(positions)
+        ax.set_xticklabels(labels, rotation=0, fontsize=8)
+    elif axis == "y":
+        ax.set_yticks(positions)
+        ax.set_yticklabels(labels, fontsize=8)
+    else:
+        raise ValueError("axis must be 'x' or 'y'")
+
+
+def _format_timestamp(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
 def _save_probability_self_plot(
     plt,
     track_dir: Path,
     probability_self: np.ndarray,
     probability_reference: np.ndarray,
     audio_audio_indices: np.ndarray,
+    sampled_times: np.ndarray,
     targets: np.ndarray,
 ) -> None:
     boundaries = np.flatnonzero(_boundary_mask(targets, ignore_index=-100)) + 1
@@ -441,8 +604,10 @@ def _save_probability_self_plot(
                 ax.axvline(boundary - 0.5, color="white", linewidth=0.35, alpha=0.55)
                 ax.axhline(boundary - 0.5, color="white", linewidth=0.35, alpha=0.55)
         ax.set_title(title)
-        ax.set_xlabel("sampled beat frame")
-        ax.set_ylabel("sampled beat frame")
+        _set_time_axis(ax, sampled_times, axis="x")
+        _set_time_axis(ax, sampled_times, axis="y")
+        ax.set_xlabel("time (min:ss)")
+        ax.set_ylabel("time (min:ss)")
         fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
     fig.savefig(track_dir / "probability_self_similarity.png", dpi=170)
     plt.close(fig)
@@ -766,6 +931,7 @@ def _heat_color(value: float) -> str:
 def _summarize_corpus(results: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
     keys = [
         "frame_accuracy",
+        "decoded_frame_accuracy",
         "text_text_offdiag_mean",
         "text_text_offdiag_max",
         "audio_text_gt_score_mean",
@@ -815,6 +981,97 @@ def _softmax(values: np.ndarray, axis: int) -> np.ndarray:
     values = values - values.max(axis=axis, keepdims=True)
     exp = np.exp(values)
     return exp / exp.sum(axis=axis, keepdims=True)
+
+
+def _sigmoid(values: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-values))
+
+
+def _last_boundary_logits(features: dict[str, Any]) -> np.ndarray | None:
+    boundary_logits = features.get("boundary_logits")
+    if not boundary_logits:
+        return None
+    return boundary_logits[-1][0].detach().cpu().numpy().astype(np.float32)
+
+
+def _diagnostic_decoding_config(
+    checkpoint_config: dict[str, Any],
+    smoothing_window: int | None,
+    smoothing_mode: str | None,
+    decoder: str | None,
+    transition_penalty: float | None,
+    boundary_decoding: bool | dict[str, Any] | str | None,
+    boundary_weight: float | None,
+    boundary_eps: float | None,
+) -> dict[str, Any]:
+    segmentation = checkpoint_config.get("validation", {}).get("segmentation", {})
+    if not isinstance(segmentation, dict):
+        segmentation = {}
+    boundary_config = _boundary_decoding_config(
+        boundary_decoding,
+        checkpoint_config=checkpoint_config,
+        fallback=segmentation.get("boundary_decoding"),
+    )
+    if boundary_weight is not None:
+        boundary_config["weight"] = float(boundary_weight)
+    if boundary_eps is not None:
+        boundary_config["eps"] = float(boundary_eps)
+    if boundary_config["weight"] < 0:
+        raise ValueError("boundary decoding weight must be non-negative")
+    if not 0.0 < boundary_config["eps"] < 0.5:
+        raise ValueError("boundary decoding eps must be between 0 and 0.5")
+    return {
+        "smoothing_window": int(
+            smoothing_window
+            if smoothing_window is not None
+            else segmentation.get("smoothing_window", 1)
+        ),
+        "smoothing_mode": str(
+            smoothing_mode
+            if smoothing_mode is not None
+            else segmentation.get("smoothing_mode", "mean")
+        ),
+        "decoder": str(decoder if decoder is not None else segmentation.get("decoder", "viterbi")),
+        "transition_penalty": float(
+            transition_penalty
+            if transition_penalty is not None
+            else segmentation.get("transition_penalty", 0.0)
+        ),
+        "boundary_decoding": boundary_config,
+    }
+
+
+def _boundary_decoding_config(
+    value: bool | dict[str, Any] | str | None,
+    checkpoint_config: dict[str, Any],
+    fallback: Any,
+) -> dict[str, Any]:
+    head_enabled = _model_boundary_head_enabled(checkpoint_config.get("model", {}))
+    if value is None:
+        value = fallback if fallback is not None else {"enabled": head_enabled}
+    if value is True:
+        value = {"enabled": True}
+    elif value is False:
+        value = {"enabled": False}
+    elif isinstance(value, str):
+        value = {"enabled": value.lower() not in {"off", "false", "disabled"}}
+    elif not isinstance(value, dict):
+        raise TypeError("boundary_decoding must be a mapping, boolean, string, or null")
+    return {
+        "enabled": bool(value.get("enabled", head_enabled)) and head_enabled,
+        "weight": float(value.get("weight", 1.0)),
+        "eps": float(value.get("eps", 1e-4)),
+    }
+
+
+def _model_boundary_head_enabled(model_config: dict[str, Any]) -> bool:
+    update_blocks = model_config.get("update_blocks", model_config.get("cross_attention", {}))
+    if not isinstance(update_blocks, dict):
+        return False
+    boundary_head = update_blocks.get("boundary_head", False)
+    if isinstance(boundary_head, dict):
+        return bool(boundary_head.get("enabled", True))
+    return bool(boundary_head)
 
 
 def _boundary_mask(targets: np.ndarray, ignore_index: int) -> np.ndarray:

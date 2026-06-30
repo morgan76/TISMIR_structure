@@ -1,0 +1,24 @@
+dataset_manifest: data/manifests/salami.local.jsonl
+output_root: data/embeddings/audio_madmom
+
+audio_encoder:
+  name: mert
+  checkpoint: m-a-p/MERT-v1-95M
+  layer: -1
+  device: cpu
+  max_seconds: null
+  trust_remote_code: true
+
+beat_tracker:
+  name: madmom
+  estimate_downbeats: true
+  fps: 100
+  min_bpm: 55.0
+  max_bpm: 215.0
+  beats_per_bar: [3, 4]
+
+pooling:
+  method: mean
+  empty: nearest
+  keep_dense: false
+  final_interval: track_duration

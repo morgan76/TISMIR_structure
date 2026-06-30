@@ -12,11 +12,21 @@ from tismir.data.schemas import Section
 ANNOTATION_PROCESSING_POLICIES = {
     "keep",
     "merge",
+    "base_labels",
     "enumerate_all_occurrences",
     "enumerate_base_occurrences",
     "enumerate_consecutive_repeats",
+    "salami_function_merge",
+    "salami_function_occurrences",
+    "salami_function_projected_lower",
 }
 RANDOM_ANNOTATION_PROCESSING_POLICIES = {"random", "sample"}
+SALAMI_FUNCTION_POLICIES = {
+    "salami_function_merge",
+    "salami_function_occurrences",
+    "salami_function_projected_lower",
+}
+SYNTHETIC_SILENCE_LABEL = "silence"
 
 
 def process_sections(
@@ -28,10 +38,36 @@ def process_sections(
     config = _annotation_processing_config(annotation_processing)
     policy = config["policy"]
     sections = list(sections)
+    if config["replace_no_function"]:
+        sections = replace_no_function_sections(
+            sections,
+            label=config["no_function_label"],
+            skip_labels=config["no_function_skip_labels"],
+        )
+    if policy == "salami_function_merge":
+        return merge_consecutive_same_label_sections(sections)
+    if policy == "salami_function_occurrences":
+        merged = merge_consecutive_same_label_sections(sections)
+        skip_bases = {label_base(label) for label in config["occurrence_skip_labels"]}
+        return enumerate_section_base_occurrences(
+            merged,
+            bases_to_enumerate=_repeated_label_bases(merged) - skip_bases,
+            start_index=config["start_index"],
+            separator=config["separator"],
+        )
+    if policy == "salami_function_projected_lower":
+        raise ValueError(
+            "salami_function_projected_lower requires access to both function and lower "
+            "SALAMI namespaces; use load_processed_structure_sections()."
+        )
     if policy == "keep":
         return sections
     if policy == "merge":
         return merge_consecutive_same_label_sections(sections)
+    if policy == "base_labels":
+        return merge_consecutive_same_label_sections(
+            [replace(section, label=label_base(section.label)) for section in sections]
+        )
     if policy == "enumerate_all_occurrences":
         return enumerate_section_occurrences(
             sections,
@@ -114,7 +150,22 @@ def _concrete_annotation_processing_choice(
     policy = str(config.get("policy", "")).lower()
     if policy in RANDOM_ANNOTATION_PROCESSING_POLICIES:
         raise ValueError("nested random annotation_processing choices are not supported")
-    for key in ("separator", "start_index"):
+    for key in (
+        "separator",
+        "start_index",
+        "replace_no_function",
+        "salami_replace_no_function",
+        "no_function_label",
+        "no_function_skip_labels",
+        "function_namespace",
+        "lower_namespace",
+        "projected_label_format",
+        "projected_preserve_labels",
+        "projected_function_policy",
+        "merge_projected_lower",
+        "occurrence_skip_labels",
+        "annotation_selection",
+    ):
         if key in parent and key not in config:
             config[key] = parent[key]
     _annotation_processing_config(config)
@@ -136,6 +187,95 @@ def merge_consecutive_same_label_sections(sections: Sequence[Section]) -> list[S
         else:
             merged.append(section)
     return merged
+
+
+def ensure_silence_label(labels: Sequence[str]) -> list[str]:
+    """Return labels with the synthetic silence class available."""
+
+    labels = list(labels)
+    if not any(_canonical_label(label) == SYNTHETIC_SILENCE_LABEL for label in labels):
+        labels.append(SYNTHETIC_SILENCE_LABEL)
+    return labels
+
+
+def silence_label_in(labels: Sequence[str]) -> str | None:
+    """Return the existing silence-like candidate label, if any."""
+
+    lowercase_to_label = {candidate.lower(): candidate for candidate in labels}
+    for candidate in ("silence", "nothing", "silent", "no music"):
+        if candidate in lowercase_to_label:
+            return lowercase_to_label[candidate]
+    return None
+
+
+def project_lower_sections_to_function_labels(
+    function_sections: Sequence[Section],
+    lower_sections: Sequence[Section],
+    label_format: str = "{function} subsegment {lower}",
+    preserve_labels: Sequence[str] = ("silence",),
+    merge_consecutive: bool = True,
+) -> list[Section]:
+    """Label SALAMI lower-level sections by their overlapping functional section."""
+
+    functions = list(function_sections)
+    lower = list(lower_sections)
+    preserve = {_canonical_label(label) for label in preserve_labels}
+    projected: list[Section] = []
+    for lower_section in lower:
+        function = _best_overlapping_section(lower_section, functions)
+        if function is None:
+            derived_label = lower_section.label
+        elif _canonical_label(function.label) in preserve:
+            derived_label = function.label.lower()
+        else:
+            derived_label = label_format.format(
+                function=function.label,
+                function_base=label_base(function.label),
+                lower=lower_section.label,
+                lower_base=label_base(lower_section.label),
+            )
+        projected.append(replace(lower_section, label=derived_label))
+
+    if merge_consecutive:
+        return merge_consecutive_same_label_sections(projected)
+    return projected
+
+
+def replace_no_function_sections(
+    sections: Sequence[Section],
+    label: str = "no_function",
+    skip_labels: Sequence[str] = (),
+) -> list[Section]:
+    """Replace SALAMI no-function placeholders with neighboring function labels."""
+
+    sections = list(sections)
+    skip = {_canonical_label(value) for value in skip_labels}
+    placeholder = _canonical_label(label)
+    replacements: list[str | None] = []
+    previous: str | None = None
+    for section in sections:
+        current = _canonical_label(section.label)
+        if current == placeholder:
+            replacements.append(previous)
+            continue
+        replacements.append(section.label)
+        if current not in skip:
+            previous = section.label
+
+    next_label: str | None = None
+    for index in range(len(sections) - 1, -1, -1):
+        current = _canonical_label(sections[index].label)
+        if current == placeholder:
+            if replacements[index] is None and next_label is not None:
+                replacements[index] = next_label
+            continue
+        if current not in skip:
+            next_label = sections[index].label
+
+    return [
+        replace(section, label=replacement) if replacement is not None else section
+        for section, replacement in zip(sections, replacements)
+    ]
 
 
 def enumerate_section_occurrences(
@@ -173,7 +313,7 @@ def enumerate_section_base_occurrences(
     counts: dict[str, int] = {}
     processed: list[Section] = []
     for section in sections:
-        base = _label_base(section.label)
+        base = label_base(section.label)
         if base not in bases_to_enumerate:
             processed.append(section)
             continue
@@ -196,11 +336,64 @@ def _annotation_processing_config(value: str | dict[str, Any] | None) -> dict[st
             "annotation_processing.policy must be one of: "
             + ", ".join(sorted(ANNOTATION_PROCESSING_POLICIES))
         )
+    replace_no_function_default = policy in SALAMI_FUNCTION_POLICIES
+    annotation_selection = str(value.get("annotation_selection", "first"))
+    if annotation_selection not in {"first", "richest_function"}:
+        raise ValueError("annotation_processing.annotation_selection must be one of: first, richest_function")
+    projected_function_policy = str(value.get("projected_function_policy", "salami_function_merge"))
+    if projected_function_policy not in {"salami_function_merge", "salami_function_occurrences"}:
+        raise ValueError(
+            "annotation_processing.projected_function_policy must be one of: "
+            "salami_function_merge, salami_function_occurrences"
+        )
     return {
         "policy": policy,
         "separator": str(value.get("separator", " ")),
         "start_index": int(value.get("start_index", 1)),
+        "annotation_selection": annotation_selection,
+        "replace_no_function": bool(
+            value.get(
+                "replace_no_function",
+                value.get("salami_replace_no_function", replace_no_function_default),
+            )
+        ),
+        "no_function_label": str(value.get("no_function_label", "no_function")),
+        "no_function_skip_labels": tuple(value.get("no_function_skip_labels", ())),
+        "function_namespace": str(value.get("function_namespace", "segment_salami_function")),
+        "lower_namespace": str(value.get("lower_namespace", "segment_salami_lower")),
+        "projected_label_format": str(
+            value.get("projected_label_format", "{function} subsegment {lower}")
+        ),
+        "projected_preserve_labels": tuple(value.get("projected_preserve_labels", ("silence",))),
+        "projected_function_policy": projected_function_policy,
+        "merge_projected_lower": bool(value.get("merge_projected_lower", True)),
+        "occurrence_skip_labels": tuple(
+            value.get(
+                "occurrence_skip_labels",
+                ("silence",) if policy == "salami_function_occurrences" else (),
+            )
+        ),
     }
+
+
+def annotation_processing_config(value: str | dict[str, Any] | None) -> dict[str, Any]:
+    """Return normalized annotation-processing config."""
+
+    return _annotation_processing_config(value)
+
+
+def is_salami_projected_lower_policy(value: str | dict[str, Any] | None) -> bool:
+    return _annotation_processing_config(value)["policy"] == "salami_function_projected_lower"
+
+
+def source_namespace_for_annotation_processing(
+    namespace: str,
+    annotation_processing: str | dict[str, Any] | None,
+) -> str:
+    config = _annotation_processing_config(annotation_processing)
+    if config["policy"] in SALAMI_FUNCTION_POLICIES:
+        return config["function_namespace"]
+    return namespace
 
 
 def _repeated_labels(sections: Sequence[Section]) -> set[str]:
@@ -213,7 +406,7 @@ def _repeated_labels(sections: Sequence[Section]) -> set[str]:
 def _repeated_label_bases(sections: Sequence[Section]) -> set[str]:
     counts: dict[str, int] = {}
     for section in sections:
-        base = _label_base(section.label)
+        base = label_base(section.label)
         counts[base] = counts.get(base, 0) + 1
     return {label for label, count in counts.items() if count > 1}
 
@@ -228,7 +421,9 @@ def _consecutively_repeated_labels(sections: Sequence[Section]) -> set[str]:
     return repeated
 
 
-def _label_base(label: str) -> str:
+def label_base(label: str) -> str:
+    """Return a normalized section base label without occurrence markers."""
+
     text = re.sub(r"[_\-]+", " ", label.strip().lower())
     text = re.sub(r"(?<=[a-z])(?=\d)", " ", text)
     text = re.sub(r"(?<=\d)(?=[a-z])", " ", text)
@@ -242,6 +437,21 @@ def _merge_confidence(left: float | None, right: float | None) -> float | None:
     if right is None:
         return left
     return 0.5 * (left + right)
+
+
+def _canonical_label(label: str) -> str:
+    return re.sub(r"[\s_\-]+", "_", label.strip().lower())
+
+
+def _best_overlapping_section(section: Section, candidates: Sequence[Section]) -> Section | None:
+    best_section = None
+    best_overlap = 0.0
+    for candidate in candidates:
+        overlap = _overlap(section.start, section.end, candidate.start, candidate.end)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_section = candidate
+    return best_section
 
 
 def assign_intervals_to_grid(
@@ -421,8 +631,4 @@ def _map_synthetic_boundary_label(label: str, candidate_labels: Sequence[str]) -
     if label not in {"__T_MIN", "__T_MAX"}:
         return label
 
-    lowercase_to_label = {candidate.lower(): candidate for candidate in candidate_labels}
-    for candidate in ("silence", "nothing", "silent", "no music"):
-        if candidate in lowercase_to_label:
-            return lowercase_to_label[candidate]
-    return label
+    return silence_label_in(candidate_labels) or label

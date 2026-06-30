@@ -1,4 +1,4 @@
-output_root: data/embeddings/text_occurrence_descriptive_random_annotations
+output_root: data/embeddings/text_occurrence_descriptive_merge_base
 scope: dataset
 
 text_encoder:
@@ -22,8 +22,5 @@ annotation_processing:
   seed: 0
   validation_policy: enumerate_base_occurrences
   choices:
-    - keep
     - merge
-    - enumerate_all_occurrences
     - enumerate_base_occurrences
-    - enumerate_consecutive_repeats

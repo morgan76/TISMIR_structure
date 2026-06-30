@@ -7,6 +7,7 @@ from typing import Any
 HARMONIX_ALIASES = {
     "altchorus": "alternate chorus",
     "bigoutro": "big outro",
+    "build": "build up",
     "chorushalf": "chorus half",
     "chorusinst": "instrumental chorus",
     "drumroll": "drum roll",
@@ -21,17 +22,24 @@ HARMONIX_ALIASES = {
     "instchorus": "instrumental chorus",
     "instintro": "instrumental intro",
     "instrumentalverse": "instrumental verse",
+    "intchorus": "interlude chorus",
     "introverse": "intro verse",
     "mainriff": "main riff",
     "oddriff": "odd riff",
+    "opening": "opening",
     "postchorus": "post chorus",
     "postverse": "post verse",
     "ppostchorus": "post post chorus",
     "prechorus": "pre chorus",
     "preverse": "pre verse",
     "quietchorus": "quiet chorus",
+    "raps": "rap",
     "rhythmlessintro": "rhythmless intro",
+    "section": "generic section",
+    "slow": "slow section",
     "slowverse": "slow verse",
+    "stutter": "stutter section",
+    "synth": "synthesizer",
     "transtiion": "transition",
     "verseslow": "slow verse",
     "verseinst": "instrumental verse",
@@ -86,7 +94,6 @@ def _normalize_generic_label(label: str, overrides: dict[str, str]) -> str:
 
     label = re.sub(r"[_\-]+", " ", label.strip().lower())
     label = re.sub(r"(?<=[a-z])(?=\d)", " ", label)
-    label = re.sub(r"(?<=\d)(?=[a-z])", " ", label)
     return label
 
 
@@ -104,5 +111,4 @@ def _split_suffix(label: str) -> tuple[str, str]:
 def _join_suffix(label: str, suffix: str) -> str:
     if not suffix:
         return label
-    suffix = re.sub(r"(?<=\d)(?=[a-z])", " ", suffix)
     return f"{label} {suffix}"

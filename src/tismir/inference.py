@@ -8,6 +8,7 @@ import numpy as np
 
 from tismir.decoding.jams import save_segments_jams
 from tismir.decoding.segments import (
+    boundary_times_from_intervals,
     decode_label_indices,
     merge_frame_labels,
     remove_short_segments,
@@ -27,24 +28,38 @@ def run_baseline_inference(
     output_dir: str | Path,
     audio_embedding_key: str = "beat_sync",
     namespace: str = "segment_open",
+    prediction_namespace: str | None = None,
     device: str = "auto",
     limit: int | None = None,
     candidate_label_strategy: str = "track_labels",
     annotation_processing: str | dict[str, Any] | None = None,
-    smoothing_window: int = 1,
+    smoothing_window: int = 7,
     smoothing_mode: str = "mean",
-    decoder: str = "argmax",
-    transition_penalty: float = 0.0,
+    decoder: str = "viterbi",
+    transition_penalty: float = 8.0,
     min_segment_duration: float = 0.0,
+    beat_subsampling: bool | dict[str, Any] | None = None,
+    track_filter: bool | dict[str, Any] | None = None,
+    boundary_decoding: bool | dict[str, Any] | str | None = None,
 ) -> list[dict[str, Any]]:
     """Run baseline inference over a manifest and save predictions."""
 
     torch = _require_torch()
+    if prediction_namespace is None:
+        prediction_namespace = namespace
     device_obj = _resolve_device(device, torch)
     checkpoint = torch.load(checkpoint_path, map_location=device_obj)
     config = checkpoint["config"]
     if annotation_processing is None:
         annotation_processing = config.get("data", {}).get("annotation_processing")
+    if beat_subsampling is None:
+        beat_subsampling = config.get("data", {}).get("beat_subsampling")
+    if track_filter is None:
+        track_filter = config.get("data", {}).get("track_filter")
+    boundary_decoding_config = _boundary_decoding_config(
+        boundary_decoding,
+        checkpoint_config=config,
+    )
 
     dataset = StructureEmbeddingDataset(
         manifest=manifest,
@@ -56,6 +71,8 @@ def run_baseline_inference(
         namespace=namespace,
         candidate_label_strategy=candidate_label_strategy,
         annotation_processing=annotation_processing,
+        beat_subsampling=beat_subsampling,
+        track_filter=track_filter,
         ignore_index=int(config.get("data", {}).get("ignore_index", -100)),
     )
 
@@ -74,24 +91,47 @@ def run_baseline_inference(
         with torch.inference_mode():
             audio = torch.from_numpy(example.audio).unsqueeze(0).to(device_obj)
             text = torch.from_numpy(example.text).to(device_obj)
-            logits = model(audio, text)[0].detach().cpu().numpy()
+            if hasattr(model, "extract_features"):
+                features = model.extract_features(audio, text)
+                logits = features["logits"][0].detach().cpu().numpy()
+                boundary_logits = _last_boundary_logits(features)
+                boundary_probabilities = _sigmoid(boundary_logits)
+            else:
+                logits = model(audio, text)[0].detach().cpu().numpy()
+                boundary_logits = None
+                boundary_probabilities = None
 
         decoded_logits = smooth_logits(logits, window=smoothing_window, mode=smoothing_mode)
         label_indices = decode_label_indices(
             decoded_logits,
             strategy=decoder,
             transition_penalty=transition_penalty,
+            boundary_probabilities=boundary_probabilities,
+            boundary_weight=(
+                float(boundary_decoding_config["weight"])
+                if bool(boundary_decoding_config["enabled"]) and boundary_probabilities is not None
+                else 0.0
+            ),
+            boundary_eps=float(boundary_decoding_config["eps"]),
         )
         frame_labels = [example.labels[int(label_index)] for label_index in label_indices]
         segments = merge_frame_labels(example.beat_intervals, frame_labels)
-        segments = remove_short_segments(segments, min_duration=min_segment_duration)
+        segments = remove_short_segments(
+            segments,
+            min_duration=min_segment_duration,
+        )
         duration = example.beat_intervals[-1][1] if example.beat_intervals else None
 
         track_dir = output_dir / example.dataset
         track_dir.mkdir(parents=True, exist_ok=True)
         jams_path = track_dir / f"{example.track_id}.jams"
         json_path = track_dir / f"{example.track_id}.json"
-        save_segments_jams(jams_path, segments, duration=duration, namespace=namespace)
+        save_segments_jams(
+            jams_path,
+            segments,
+            duration=duration,
+            namespace=prediction_namespace,
+        )
         _save_prediction_json(
             json_path,
             example,
@@ -101,13 +141,19 @@ def run_baseline_inference(
             {
                 "candidate_label_strategy": candidate_label_strategy,
                 "annotation_processing": annotation_processing,
+                "reference_namespace": namespace,
+                "prediction_namespace": prediction_namespace,
                 "smoothing_window": smoothing_window,
                 "smoothing_mode": smoothing_mode,
                 "decoder": decoder,
                 "transition_penalty": transition_penalty,
                 "min_segment_duration": min_segment_duration,
+                "beat_subsampling": beat_subsampling,
+                "track_filter": track_filter,
+                "boundary_decoding": boundary_decoding_config,
             },
             label_indices,
+            boundary_logits=boundary_logits,
         )
 
         result = {
@@ -135,6 +181,7 @@ def _save_prediction_json(
     decoded_logits: np.ndarray,
     decoding: dict[str, Any],
     label_indices: np.ndarray,
+    boundary_logits: np.ndarray | None = None,
 ) -> None:
     probabilities = _softmax(decoded_logits, axis=-1)
     payload = {
@@ -150,6 +197,11 @@ def _save_prediction_json(
         "frame_confidence": probabilities.max(axis=-1).astype(float).tolist(),
         "raw_frame_label_indices": raw_logits.argmax(axis=-1).astype(int).tolist(),
     }
+    if boundary_logits is not None:
+        payload["boundary_predictions"] = _boundary_prediction_payload(
+            boundary_logits,
+            example.beat_intervals,
+        )
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
         handle.write("\n")
@@ -159,6 +211,81 @@ def _softmax(values: np.ndarray, axis: int) -> np.ndarray:
     values = values - values.max(axis=axis, keepdims=True)
     exp = np.exp(values)
     return exp / exp.sum(axis=axis, keepdims=True)
+
+
+def _last_boundary_logits(features: dict[str, Any]) -> np.ndarray | None:
+    boundary_logits = features.get("boundary_logits")
+    if not boundary_logits:
+        return None
+    return boundary_logits[-1][0].detach().cpu().numpy().astype(np.float32)
+
+
+def _sigmoid(values: np.ndarray | None) -> np.ndarray | None:
+    if values is None:
+        return None
+    return 1.0 / (1.0 + np.exp(-values))
+
+
+def _boundary_prediction_payload(
+    boundary_logits: np.ndarray,
+    beat_intervals: list[tuple[float, float]],
+) -> list[dict[str, float]]:
+    if len(boundary_logits) != max(len(beat_intervals) - 1, 0):
+        raise ValueError("Boundary logits and beat intervals have incompatible lengths")
+    probabilities = _sigmoid(boundary_logits)
+    boundary_times = boundary_times_from_intervals(beat_intervals)
+    return [
+        {
+            "time": float(time),
+            "probability": float(probability),
+            "logit": float(logit),
+        }
+        for time, probability, logit in zip(boundary_times, probabilities, boundary_logits)
+    ]
+
+
+def _boundary_decoding_config(
+    value: bool | dict[str, Any] | str | None,
+    checkpoint_config: dict[str, Any],
+) -> dict[str, Any]:
+    head_enabled = _model_boundary_head_enabled(checkpoint_config.get("model", {}))
+    if value in (None, "auto"):
+        segmentation = checkpoint_config.get("validation", {}).get("segmentation", {})
+        if isinstance(segmentation, dict) and "boundary_decoding" in segmentation:
+            value = segmentation["boundary_decoding"]
+        else:
+            value = {"enabled": head_enabled}
+    if value is True:
+        value = {"enabled": True}
+    elif value is False:
+        value = {"enabled": False}
+    elif isinstance(value, str):
+        value = {"enabled": value.lower() not in {"off", "false", "disabled"}}
+    elif not isinstance(value, dict):
+        raise TypeError("boundary_decoding must be a mapping, boolean, 'auto', or null")
+
+    enabled = bool(value.get("enabled", head_enabled)) and head_enabled
+    weight = float(value.get("weight", 1.0))
+    if weight < 0:
+        raise ValueError("boundary_decoding.weight must be non-negative")
+    eps = float(value.get("eps", 1e-4))
+    if not 0.0 < eps < 0.5:
+        raise ValueError("boundary_decoding.eps must be between 0 and 0.5")
+    return {
+        "enabled": enabled,
+        "weight": weight,
+        "eps": eps,
+    }
+
+
+def _model_boundary_head_enabled(model_config: dict[str, Any]) -> bool:
+    update_blocks = model_config.get("update_blocks", model_config.get("cross_attention", {}))
+    if not isinstance(update_blocks, dict):
+        return False
+    boundary_head = update_blocks.get("boundary_head", False)
+    if isinstance(boundary_head, dict):
+        return bool(boundary_head.get("enabled", True))
+    return bool(boundary_head)
 
 
 def _resolve_device(device: str, torch):

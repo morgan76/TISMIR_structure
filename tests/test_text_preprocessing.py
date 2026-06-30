@@ -5,7 +5,22 @@ import jams
 import numpy as np
 
 from tismir.data.schemas import Track
+from tismir.preprocessing.label_normalization import normalize_label
 from tismir.preprocessing.text import preprocess_dataset_text
+
+
+def test_harmonix_label_normalization_makes_dataset_tokens_readable():
+    config = {"name": "harmonix", "normalize_whitespace": True}
+
+    assert normalize_label("intchorus", config) == "interlude chorus"
+    assert normalize_label("intchorus7", config) == "interlude chorus 7"
+    assert normalize_label("section15", config) == "generic section 15"
+    assert normalize_label("stutter2", config) == "stutter section 2"
+    assert normalize_label("synth", config) == "synthesizer"
+    assert normalize_label("raps", config) == "rap"
+    assert normalize_label("slow", config) == "slow section"
+    assert normalize_label("build", config) == "build up"
+    assert normalize_label("verse1a", config) == "verse 1a"
 
 
 def test_preprocess_dataset_text_writes_label_embeddings(tmp_path):
@@ -29,27 +44,30 @@ def test_preprocess_dataset_text_writes_label_embeddings(tmp_path):
 
     assert len(results) == 1
     output_dir = Path(results[0].output_dir)
-    assert np.load(output_dir / "embeddings.npy").shape == (4, 8)
+    assert np.load(output_dir / "embeddings.npy").shape == (5, 8)
 
     labels = json.loads((output_dir / "labels.json").read_text(encoding="utf-8"))
-    assert labels["labels"] == ["fadeout", "verseinst", "instrumentalverse", "inst6"]
+    assert labels["labels"] == ["fadeout", "verseinst", "instrumentalverse", "inst6", "silence"]
     assert labels["text_labels"] == [
         "fade out",
         "instrumental verse",
         "instrumental verse",
         "instrumental 6",
+        "silence",
     ]
     assert labels["prompt_labels"] == [
         "fade out",
         "instrumental verse (verseinst)",
         "instrumental verse (instrumentalverse)",
         "instrumental 6",
+        "silence",
     ]
     assert labels["prompts"] == [
         "music section: fade out",
         "music section: instrumental verse (verseinst)",
         "music section: instrumental verse (instrumentalverse)",
         "music section: instrumental 6",
+        "music section: silence",
     ]
 
 
@@ -72,7 +90,7 @@ def test_preprocess_dataset_text_uses_annotation_processing(tmp_path):
     )
 
     labels = json.loads((Path(results[0].output_dir) / "labels.json").read_text(encoding="utf-8"))
-    assert labels["labels"] == ["verse 1", "verse 2", "chorus", "verse 3"]
+    assert labels["labels"] == ["verse 1", "verse 2", "chorus", "verse 3", "silence"]
 
 
 def test_preprocess_dataset_text_can_enumerate_base_occurrences(tmp_path):
@@ -94,7 +112,7 @@ def test_preprocess_dataset_text_can_enumerate_base_occurrences(tmp_path):
     )
 
     labels = json.loads((Path(results[0].output_dir) / "labels.json").read_text(encoding="utf-8"))
-    assert labels["labels"] == ["verse 1", "chorus", "verse 2", "verse 3"]
+    assert labels["labels"] == ["verse 1", "chorus", "verse 2", "verse 3", "silence"]
 
 
 def test_preprocess_dataset_text_random_annotation_processing_encodes_union(tmp_path):
@@ -119,7 +137,7 @@ def test_preprocess_dataset_text_random_annotation_processing_encodes_union(tmp_
     )
 
     labels = json.loads((Path(results[0].output_dir) / "labels.json").read_text(encoding="utf-8"))
-    assert labels["labels"] == ["verse", "chorus", "verse 1", "verse 2", "verse 3"]
+    assert labels["labels"] == ["verse", "chorus", "verse 1", "verse 2", "verse 3", "silence"]
 
 
 def test_preprocess_dataset_text_can_use_descriptive_music_structure_prompts(tmp_path):

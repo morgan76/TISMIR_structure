@@ -1,0 +1,452 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{microtype}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+\title{Text-Conditioned Music Structure Analysis with Continuous Label Embeddings}
+\author{TISMIR Structure Project}
+\date{\today}
+
+\newcommand{\audioseq}{\mathbf{A}}
+\newcommand{\textset}{\mathbf{E}}
+\newcommand{\audiohid}{\mathbf{X}}
+\newcommand{\texthid}{\mathbf{Z}}
+\newcommand{\logits}{\mathbf{S}}
+\newcommand{\probs}{\mathbf{P}}
+\newcommand{\labels}{\mathcal{L}}
+\newcommand{\frames}{\mathcal{T}}
+\newcommand{\ignore}{\mathtt{ignore}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document describes the current model used in the TISMIR structure-analysis project.
+The goal is beat-synchronous music structure segmentation conditioned on an arbitrary
+set of text labels. Instead of predicting labels from a fixed taxonomy, the model maps
+audio frames and text label embeddings into a shared space and predicts frame-level
+label assignments from their similarities. The current implementation is inspired by
+FACT, the Frame-Action Cross-Attention Temporal Modeling architecture for action
+segmentation, but adapts it to open-vocabulary music section labels. The document also
+summarizes the optional FACT-inspired modules recently added to the codebase:
+intermediate supervision, cross-attention alignment supervision, and attention-fused
+prediction.
+\end{abstract}
+
+\section{Problem Setting}
+
+Let a song be represented by a beat-synchronous sequence of precomputed audio
+embeddings
+\begin{equation}
+  \audioseq = (a_1,\ldots,a_T), \qquad a_t \in \mathbb{R}^{D_a},
+\end{equation}
+where $T$ is the number of beat intervals. For the same track, a candidate label set is
+provided:
+\begin{equation}
+  \labels = \{\ell_1,\ldots,\ell_K\}.
+\end{equation}
+Each label is encoded by an off-the-shelf text encoder, giving
+\begin{equation}
+  \textset = (e_1,\ldots,e_K), \qquad e_k \in \mathbb{R}^{D_t}.
+\end{equation}
+
+The model predicts a distribution over the provided candidate labels for each beat:
+\begin{equation}
+  p_\theta(y_t = k \mid \audioseq, \labels), \qquad t \in \{1,\ldots,T\}, \quad
+  k \in \{1,\ldots,K\}.
+\end{equation}
+The key design constraint is that the label set is not fixed at training or inference
+time. At inference, the user may provide a coarse label set such as
+\begin{quote}
+\texttt{intro, verse, chorus, outro}
+\end{quote}
+or a more detailed label set such as
+\begin{quote}
+\texttt{intro, verse 1, chorus 1, verse 2, chorus 2, bridge, chorus 3, outro}.
+\end{quote}
+The resulting segmentation should follow the granularity of the provided label set.
+
+\section{Input Preprocessing}
+
+\subsection{Audio Embeddings}
+
+Audio is processed offline. A music audio encoder such as MERT is applied to the full
+track, and embeddings are pooled over beat intervals. The default pooling is mean
+pooling over each beat interval. The resulting matrix is saved as a NumPy array:
+\begin{equation}
+  \audioseq \in \mathbb{R}^{T \times D_a}.
+\end{equation}
+Beat positions are estimated by an external beat tracker and stored alongside the
+embeddings.
+
+\subsection{Text Embeddings}
+
+Each section label is normalized, optionally prompted, then encoded by a pretrained
+text encoder. The project currently supports several prompt modes. The most relevant
+for occurrence-level labels is:
+\begin{quote}
+\texttt{Music structure label: \{label\}. Meaning: \{occurrence\_prompt\}. Use this label for frames belonging to \{occurrence\_prompt\}.}
+\end{quote}
+For example:
+\begin{quote}
+\texttt{Music structure label: chorus 2. Meaning: the second occurrence of the chorus section in this song. Use this label for frames belonging to the second occurrence of the chorus section in this song.}
+\end{quote}
+
+\subsection{Annotation Policies}
+
+The codebase supports multiple annotation-processing policies:
+\begin{itemize}[leftmargin=*]
+  \item \texttt{keep}: use labels as they appear in the original annotation.
+  \item \texttt{merge}: merge consecutive identical section labels.
+  \item \texttt{enumerate\_all\_occurrences}: enumerate repeated labels in chronological order.
+  \item \texttt{enumerate\_base\_occurrences}: strip existing occurrence markers and re-enumerate base labels.
+  \item \texttt{enumerate\_consecutive\_repeats}: enumerate only labels involved in consecutive repeated sections.
+\end{itemize}
+
+Training may also use a random annotation policy. In that setting, each track and epoch
+uses one sampled policy, while validation remains deterministic. This acts as label
+granularity augmentation.
+
+\section{Base Architecture}
+
+\subsection{Projection}
+
+Audio and text embeddings are first projected to a common model dimension $d$:
+\begin{align}
+  \audiohid^{(0)} &= f_a(\audioseq) \in \mathbb{R}^{T \times d}, \\
+  \texthid^{(0)} &= f_t(\textset) \in \mathbb{R}^{K \times d}.
+\end{align}
+The projections are small feed-forward networks, typically linear--GELU--linear.
+
+\subsection{Audio Positional Encoding}
+
+The audio side may use absolute sinusoidal positional encoding:
+\begin{equation}
+  \audiohid^{(0)} \leftarrow \audiohid^{(0)} + \mathrm{PE}.
+\end{equation}
+Rotary positional encoding is also implemented, but in recent experiments sinusoidal
+encoding has generalized better.
+
+\subsection{Initial Audio and Text Encoders}
+
+The audio sequence is processed by a Transformer encoder:
+\begin{equation}
+  \audiohid = \mathrm{AudioEnc}(\audiohid^{(0)}).
+\end{equation}
+For non-bidirectional cross-attention models, the text tokens are processed by a text
+Transformer. For the FACT-style bidirectional model, text tokens are first projected,
+then updated by an input block using audio information.
+
+\section{FACT-Inspired Bidirectional Blocks}
+
+The model is inspired by FACT~\cite{lu2024fact}, which alternates between frame tokens
+and task-level tokens. In this project, the task-level tokens are section label tokens.
+The main analogy is:
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+FACT terminology & Music-structure model & Meaning \\
+\midrule
+Frame tokens & Audio beat tokens & Beat-synchronous audio sequence \\
+Task-level tokens & Section label tokens & Candidate structure labels \\
+Temporal segmentation & Section segmentation & Frame-level label assignment \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Input Block}
+
+The input block lets text label tokens attend to the audio sequence:
+\begin{equation}
+  \texthid \leftarrow
+  \mathrm{LN}\left(
+    \texthid + \mathrm{MHA}(\texthid, \audiohid, \audiohid)
+  \right),
+\end{equation}
+then applies a section-token branch Transformer to refine the label tokens.
+
+\subsection{Update Blocks}
+
+Each update block has two cross-attention directions:
+\begin{align}
+  \texthid &\leftarrow
+  \mathrm{SectionBranch}\left(
+    \mathrm{LN}\left(
+      \texthid + \mathrm{MHA}(\texthid, \audiohid, \audiohid)
+    \right)
+  \right), \\
+  \audiohid &\leftarrow
+  \mathrm{FrameBranch}\left(
+    \mathrm{LN}\left(
+      \audiohid + \mathrm{MHA}(\audiohid, \texthid, \texthid)
+    \right)
+  \right).
+\end{align}
+Here $\mathrm{MHA}(Q,K,V)$ denotes multi-head attention. In the current
+implementation, the frame branch is a self-attention Transformer encoder rather than a
+temporal convolution.
+
+\section{Prediction Head}
+
+Final audio and text tokens are optionally normalized:
+\begin{align}
+  \hat{x}_t &= \frac{x_t}{\|x_t\|_2}, \\
+  \hat{z}_k &= \frac{z_k}{\|z_k\|_2}.
+\end{align}
+The direct similarity logits are:
+\begin{equation}
+  s_{t,k}^{\mathrm{direct}}
+  =
+  \frac{\hat{x}_t^\top \hat{z}_k}{\tau},
+\end{equation}
+where $\tau$ is a temperature.
+
+The frame-label probability is:
+\begin{equation}
+  p_t(k) =
+  \mathrm{softmax}_k(s_{t,k}).
+\end{equation}
+
+\section{Optional FACT-Inspired Improvements}
+
+Three optional modules are now controlled by config flags.
+
+\subsection{Intermediate Supervision}
+
+Each FACT update block can emit intermediate logits:
+\begin{equation}
+  \logits^{(b)} \in \mathbb{R}^{T \times K}, \qquad b = 1,\ldots,B.
+\end{equation}
+An auxiliary frame-label loss can be applied at every update block:
+\begin{equation}
+  \mathcal{L}_{\mathrm{intermediate}}
+  =
+  \frac{1}{B}\sum_{b=1}^{B}
+  \mathrm{CE}(\logits^{(b)}, y).
+\end{equation}
+This encourages every update stage to produce useful frame-label predictions, rather
+than relying only on the final block.
+
+Config:
+\begin{verbatim}
+model:
+  cross_attention:
+    intermediate_logits: true
+
+loss:
+  intermediate_frame_label:
+    weight: 0.2
+\end{verbatim}
+
+\subsection{Cross-Attention Alignment Supervision}
+
+The model can expose two attention maps per update block:
+\begin{align}
+  A^{\mathrm{frame}\rightarrow\mathrm{text}} &\in \mathbb{R}^{T \times K}, \\
+  A^{\mathrm{text}\rightarrow\mathrm{frame}} &\in \mathbb{R}^{K \times T}.
+\end{align}
+
+Frame-to-text alignment asks each frame to attend to its ground-truth label token:
+\begin{equation}
+  \mathcal{L}_{f \rightarrow l}
+  =
+  -\frac{1}{|\frames|}
+  \sum_{t \in \frames}
+  \log A^{\mathrm{frame}\rightarrow\mathrm{text}}_{t,y_t}.
+\end{equation}
+
+Text-to-frame alignment asks each label token to attend to frames assigned to that
+label:
+\begin{equation}
+  \mathcal{L}_{l \rightarrow f}
+  =
+  -\frac{1}{|\labels|}
+  \sum_{k \in \labels}
+  \frac{1}{|\frames_k|}
+  \sum_{t \in \frames_k}
+  \log A^{\mathrm{text}\rightarrow\mathrm{frame}}_{k,t}.
+\end{equation}
+
+The combined alignment loss is:
+\begin{equation}
+  \mathcal{L}_{\mathrm{attn}}
+  =
+  \lambda_f \mathcal{L}_{f \rightarrow l}
+  +
+  \lambda_l \mathcal{L}_{l \rightarrow f}.
+\end{equation}
+
+Config:
+\begin{verbatim}
+model:
+  cross_attention:
+    return_attention: true
+
+loss:
+  cross_attention_alignment:
+    weight: 0.05
+    frame_to_text_weight: 1.0
+    label_to_frame_weight: 1.0
+    use_all_blocks: true
+\end{verbatim}
+
+\subsection{Attention-Fused Prediction}
+
+The frame-to-text attention map can be used as a second prediction path. If
+$A_{t,k}$ is the final frame-to-text attention probability, define:
+\begin{equation}
+  s_{t,k}^{\mathrm{attn}} = \log(A_{t,k} + \epsilon).
+\end{equation}
+The final logits are:
+\begin{equation}
+  s_{t,k}
+  =
+  (1-\alpha)s_{t,k}^{\mathrm{direct}}
+  +
+  \alpha s_{t,k}^{\mathrm{attn}}.
+\end{equation}
+This gives the model a direct way to use cross-attention alignment during prediction.
+
+Config:
+\begin{verbatim}
+model:
+  cross_attention:
+    attention_fusion:
+      enabled: true
+      weight: 0.25
+\end{verbatim}
+
+\section{Training Objective}
+
+The default supervised objective is frame-label cross-entropy:
+\begin{equation}
+  \mathcal{L}_{\mathrm{CE}}
+  =
+  - \sum_{t : y_t \ne \ignore}
+  \log p_t(y_t).
+\end{equation}
+
+The pairwise probability loss operates on the predicted frame-label distributions:
+\begin{equation}
+  Q = \probs \probs^\top,
+\end{equation}
+where
+\begin{equation}
+  Q_{i,j} = \sum_{k=1}^{K} p_i(k)p_j(k)
+\end{equation}
+is the model-implied probability that frames $i$ and $j$ share the same label. The
+reference matrix is:
+\begin{equation}
+  R_{i,j} = \mathbb{1}[y_i = y_j].
+\end{equation}
+The loss is binary cross-entropy between $Q$ and $R$, optionally balanced by class
+counts.
+
+The total objective may combine:
+\begin{equation}
+  \mathcal{L}
+  =
+  \lambda_{\mathrm{CE}}\mathcal{L}_{\mathrm{CE}}
+  +
+  \lambda_{\mathrm{pair}}\mathcal{L}_{\mathrm{pair}}
+  +
+  \lambda_{\mathrm{inter}}\mathcal{L}_{\mathrm{intermediate}}
+  +
+  \lambda_{\mathrm{attn}}\mathcal{L}_{\mathrm{attn}}.
+\end{equation}
+
+\section{Inference}
+
+At inference time, a track is processed with a chosen candidate label set. The model
+produces beat-level logits, which may be smoothed temporally:
+\begin{equation}
+  \tilde{\logits} = \mathrm{Smooth}(\logits).
+\end{equation}
+Labels are decoded either by simple argmax or by Viterbi decoding with a transition
+penalty. Consecutive frames assigned to the same label are merged into segments.
+
+\section{Current Observations}
+
+Recent diagnostics suggest that the model can learn meaningful section structure, but
+generalization remains the main challenge. Easy tracks show clean block-diagonal
+probability self-similarity matrices. Harder tracks tend to show weak audio-text
+margins and label competition in ambiguous middle or late sections. Random annotation
+policy training improves full-validation performance by exposing the model to multiple
+granularity conventions.
+
+The most promising next directions are:
+\begin{enumerate}[leftmargin=*]
+  \item supervised cross-attention alignment;
+  \item intermediate block-level supervision;
+  \item attention-fused prediction;
+  \item memory-efficient frame branches for long songs;
+  \item lightweight audio-feature augmentation.
+\end{enumerate}
+
+\section{Example Experiment Configuration}
+
+\begin{verbatim}
+model:
+  name: temporal_text_adapter
+  audio:
+    hidden_dim: 128
+    positional_encoding:
+      type: sinusoidal
+    num_layers: 2
+  text:
+    hidden_dim: 128
+    num_layers: 1
+  adapter:
+    model_dim: 128
+    num_heads: 8
+    feedforward_dim: 512
+    dropout: 0.2
+  cross_attention:
+    enabled: true
+    bidirectional: true
+    num_layers: 4
+    num_heads: 8
+    intermediate_logits: true
+    return_attention: true
+    attention_fusion:
+      enabled: true
+      weight: 0.25
+
+loss:
+  frame_label_weight: 1.0
+  intermediate_frame_label:
+    weight: 0.2
+  cross_attention_alignment:
+    weight: 0.05
+    frame_to_text_weight: 1.0
+    label_to_frame_weight: 1.0
+    use_all_blocks: true
+  pairwise_probability:
+    weight: 0.05
+    balance: true
+\end{verbatim}
+
+\begin{thebibliography}{9}
+
+\bibitem{lu2024fact}
+Lu, Y., Liu, J., Zhang, Y., Liu, Y., and Chen, X.
+\newblock FACT: Frame-Action Cross-Attention Temporal Modeling for Efficient Action Segmentation.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition}, 2024.
+\newblock \url{https://openaccess.thecvf.com/content/CVPR2024/papers/Lu_FACT_Frame-Action_Cross-Attention_Temporal_Modeling_for_Efficient_Action_Segmentation_CVPR_2024_paper.pdf}
+
+\end{thebibliography}
+
+\end{document}

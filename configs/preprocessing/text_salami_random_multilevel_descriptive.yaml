@@ -1,0 +1,57 @@
+output_root: data/embeddings/text_salami_random_multilevel_descriptive
+scope: dataset
+
+text_encoder:
+  name: sentence_transformers
+  checkpoint: intfloat/e5-base-v2
+  device: null
+  normalize_embeddings: true
+  batch_size: 32
+
+prompt:
+  mode: descriptive
+  normalize_whitespace: true
+  descriptions:
+    applause: audience applause or crowd response outside the main musical structure.
+    backing: a backing or accompaniment passage supporting the lead material.
+    call and response: a section organized around alternating musical or vocal responses.
+    coda: a closing passage that concludes the piece after the main form.
+    contrasting middle: a contrasting middle section that departs from surrounding material.
+    crowd sounds: audience or environmental sound rather than the main musical performance.
+    development: a section where previous musical material is developed or varied.
+    exposition: an opening formal area that presents important musical material.
+    fade out: a closing section where the music gradually decreases in level.
+    groove: a repeated rhythmic or accompaniment-based section.
+    head: the main theme statement, especially in jazz or instrumental forms.
+    interlude: a contrasting instrumental or connecting passage between larger sections.
+    main theme: the primary recurring thematic material of the piece.
+    ostinato: a section based on a repeated rhythmic or melodic pattern.
+    post cadential: a passage following a cadence or formal arrival.
+    recapitulation: a later return of earlier formal material.
+    ritornello: a recurring instrumental refrain or return section.
+    secondary theme: a contrasting secondary thematic area.
+    spoken: a spoken-word or speech-like section.
+    stage sounds: non-musical or incidental stage sounds.
+    theme: a recurring main musical idea or thematic section.
+    variation: a varied restatement of earlier material.
+    voice: a vocal or voice-led passage.
+    voice female: a female vocal passage.
+    voice male: a male vocal passage.
+
+label_normalization:
+  name: generic
+  normalize_whitespace: true
+  disambiguate_duplicates: true
+
+annotation_processing:
+  policy: random
+  seed: 0
+  annotation_selection: richest_function
+  validation_policy: salami_function_merge
+  choices:
+    - salami_function_merge
+    - salami_function_occurrences
+    - policy: salami_function_projected_lower
+      projected_function_policy: salami_function_merge
+    - policy: salami_function_projected_lower
+      projected_function_policy: salami_function_occurrences

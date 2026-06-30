@@ -2,8 +2,11 @@ import torch
 
 from tismir.losses import (
     audio_audio_supervised_contrastive,
+    boundary_prediction_loss,
     cross_similarity_matching_loss,
     pairwise_probability_loss,
+    pairwise_structure_relation_loss,
+    pairwise_structure_loss,
     text_to_audio_infonce,
     token_uniformity_loss,
 )
@@ -58,6 +61,68 @@ def test_pairwise_probability_loss_can_disable_class_balancing():
 
     assert torch.isfinite(balanced)
     assert torch.isfinite(unbalanced)
+
+
+def test_pairwise_structure_loss_is_lower_for_correct_same_label_structure():
+    targets = torch.tensor([[0, 0, 1, 1]])
+    good_tokens = torch.tensor([[[1.0, 0.0], [0.9, 0.1], [0.0, 1.0], [0.1, 0.9]]])
+    bad_tokens = torch.tensor([[[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]]])
+
+    good_loss = pairwise_structure_loss(good_tokens, targets)
+    bad_loss = pairwise_structure_loss(bad_tokens, targets)
+
+    assert good_loss < bad_loss
+
+
+def test_pairwise_structure_loss_handles_ignored_targets():
+    tokens = torch.tensor([[[1.0, 0.0], [0.9, 0.1], [0.0, 1.0]]])
+    targets = torch.tensor([[0, -100, 1]])
+
+    loss = pairwise_structure_loss(tokens, targets)
+
+    assert torch.isfinite(loss)
+
+
+def test_pairwise_structure_relation_loss_is_lower_for_correct_relations():
+    base_targets = torch.tensor([[0, 0, 0, 1]])
+    segment_targets = torch.tensor([[0, 0, 1, 2]])
+    good_logits = torch.tensor(
+        [
+            [
+                [[0.0, 0.0, 4.0], [0.0, 0.0, 4.0], [0.0, 4.0, 0.0], [4.0, 0.0, 0.0]],
+                [[0.0, 0.0, 4.0], [0.0, 0.0, 4.0], [0.0, 4.0, 0.0], [4.0, 0.0, 0.0]],
+                [[0.0, 4.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 4.0], [4.0, 0.0, 0.0]],
+                [[4.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 0.0, 4.0]],
+            ]
+        ]
+    )
+    bad_logits = good_logits.flip(dims=[-1])
+
+    good_loss = pairwise_structure_relation_loss(good_logits, base_targets, segment_targets)
+    bad_loss = pairwise_structure_relation_loss(bad_logits, base_targets, segment_targets)
+
+    assert good_loss < bad_loss
+
+
+def test_boundary_prediction_loss_is_lower_for_correct_boundaries():
+    segment_targets = torch.tensor([[0, 0, 1, 1]])
+    good_logits = torch.tensor([[-4.0, 4.0, -4.0]])
+    bad_logits = -good_logits
+
+    good_loss = boundary_prediction_loss(good_logits, segment_targets)
+    bad_loss = boundary_prediction_loss(bad_logits, segment_targets)
+
+    assert good_loss < bad_loss
+
+
+def test_boundary_prediction_loss_handles_ignored_targets():
+    segment_targets = torch.tensor([[0, -100, 1]])
+    logits = torch.zeros((1, 2))
+
+    loss = boundary_prediction_loss(logits, segment_targets)
+
+    assert torch.isfinite(loss)
+    assert loss == 0.0
 
 
 def test_cross_similarity_matching_loss_is_lower_for_matching_similarity():

@@ -68,7 +68,7 @@ def test_run_baseline_inference_writes_predictions(tmp_path):
     assert json_path.exists()
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert payload["track_id"] == "track"
-    assert payload["labels"] == ["intro", "verse"]
+    assert payload["labels"] == ["intro", "verse", "silence"]
     assert payload["decoding"]["candidate_label_strategy"] == "track_labels"
     assert payload["segments"]
 

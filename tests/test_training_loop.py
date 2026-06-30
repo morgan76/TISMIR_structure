@@ -2,12 +2,13 @@ import wave
 from pathlib import Path
 
 import jams
+import torch
 
 from tismir.data.manifest import save_manifest
 from tismir.data.schemas import Track
 from tismir.preprocessing.audio import preprocess_track_audio
 from tismir.preprocessing.text import preprocess_dataset_text
-from tismir.training.loop import train_projection_baseline
+from tismir.training.loop import _compute_loss, _loss_config, train_projection_baseline
 
 
 def test_train_projection_baseline_smoke(tmp_path, capsys):
@@ -206,6 +207,79 @@ def test_train_temporal_adapter_with_fact_auxiliary_losses(tmp_path):
     assert (tmp_path / "train_fact" / "checkpoint.pt").exists()
     assert "loss_intermediate_frame_label" in metrics["history"][0]
     assert "loss_cross_attention_alignment" in metrics["history"][0]
+
+
+def test_link_relation_loss_uses_exact_processed_labels():
+    """Occurrence labels should become different-section pairs for link supervision."""
+
+    class LinkOnlyModel:
+        def __init__(self, link_logits):
+            self.link_logits = link_logits
+
+        def extract_features(self, audio, text, audio_mask=None):
+            return {
+                "logits": torch.zeros((1, 4, 2), dtype=torch.float32),
+                "link_logits": [self.link_logits],
+            }
+
+    link_logits = torch.full((1, 4, 4, 3), -4.0)
+    link_logits[..., 0] = 4.0
+    same_segment_pairs = [(0, 1), (1, 0), (2, 3), (3, 2)]
+    for left, right in same_segment_pairs:
+        link_logits[0, left, right] = torch.tensor([-4.0, -4.0, 4.0])
+
+    loss, components = _compute_loss(
+        model=LinkOnlyModel(link_logits),
+        audio=torch.zeros((1, 4, 2)),
+        text=torch.zeros((2, 2)),
+        targets=torch.tensor([[0, 0, 1, 1]]),
+        base_targets=torch.tensor([[0, 0, 0, 0]]),
+        segment_targets=torch.tensor([[0, 0, 1, 1]]),
+        mask=torch.ones((1, 4), dtype=torch.bool),
+        ignore_index=-100,
+        loss_config=_loss_config(
+            {
+                "frame_label_weight": 0.0,
+                "link_relation": {"weight": 1.0, "balance": False},
+            }
+        ),
+    )
+
+    assert torch.isclose(loss, components["link_relation"])
+    assert float(loss) < 0.01
+
+
+def test_boundary_loss_uses_consecutive_segment_targets():
+    class BoundaryOnlyModel:
+        def __init__(self, boundary_logits):
+            self.boundary_logits = boundary_logits
+
+        def extract_features(self, audio, text, audio_mask=None):
+            return {
+                "logits": torch.zeros((1, 4, 2), dtype=torch.float32),
+                "boundary_logits": [self.boundary_logits],
+            }
+
+    boundary_logits = torch.tensor([[-4.0, 4.0, -4.0]])
+    loss, components = _compute_loss(
+        model=BoundaryOnlyModel(boundary_logits),
+        audio=torch.zeros((1, 4, 2)),
+        text=torch.zeros((2, 2)),
+        targets=torch.tensor([[0, 0, 0, 0]]),
+        base_targets=torch.tensor([[0, 0, 0, 0]]),
+        segment_targets=torch.tensor([[0, 0, 1, 1]]),
+        mask=torch.ones((1, 4), dtype=torch.bool),
+        ignore_index=-100,
+        loss_config=_loss_config(
+            {
+                "frame_label_weight": 0.0,
+                "boundary": {"weight": 1.0},
+            }
+        ),
+    )
+
+    assert torch.isclose(loss, components["boundary"])
+    assert float(loss) < 0.03
 
 
 def _write_silent_wav(path: Path, duration: float, sample_rate: int) -> None:

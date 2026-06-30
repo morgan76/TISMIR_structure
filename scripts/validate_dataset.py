@@ -16,9 +16,13 @@ def main() -> None:
         choices=[
             "keep",
             "merge",
+            "base_labels",
             "enumerate_all_occurrences",
             "enumerate_base_occurrences",
             "enumerate_consecutive_repeats",
+            "salami_function_merge",
+            "salami_function_occurrences",
+            "salami_function_projected_lower",
         ],
         default=None,
     )
