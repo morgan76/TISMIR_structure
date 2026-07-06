@@ -1,0 +1,66 @@
+# Cluster variant of configs/train/harmonix_split_adapter_rope.yaml:
+# manifests/embeddings/outputs under /scratch/ick/music_structure/tismir_data.
+seed: 0
+device: auto
+output_dir: /scratch/ick/music_structure/tismir_data/outputs/train/harmonix_adapter_rope_encodec
+
+model:
+  name: temporal_text_adapter
+  audio:
+    input_dim: null
+    hidden_dim: 256
+    positional_encoding:
+      type: rope
+      base: 10000.0
+    num_layers: 2
+  text:
+    input_dim: null
+    hidden_dim: 256
+    num_layers: 1
+  adapter:
+    model_dim: 128
+    num_heads: 4
+    feedforward_dim: 512
+    dropout: 0.1
+  cross_attention:
+    enabled: false
+    num_heads: null
+  similarity:
+    temperature: 0.07
+    normalize: true
+
+data:
+  manifest: /scratch/ick/music_structure/tismir_data/manifests/harmonix_train.jsonl
+  audio_embedding_root: /scratch/ick/music_structure/tismir_data/embeddings/audio
+  audio_encoder: encodec
+  text_embedding_root: /scratch/ick/music_structure/tismir_data/embeddings/text
+  text_encoder: sentence_transformers
+  audio_embedding_key: beat_sync
+  namespace: segment_open
+  candidate_label_strategy: track_labels
+  ignore_index: -100
+
+validation:
+  manifest: /scratch/ick/music_structure/tismir_data/manifests/harmonix_val.jsonl
+  segmentation:
+    enabled: true
+    limit: 64
+    monitor: F-measure@3.0
+    smoothing_window: 9
+    decoder: viterbi
+    transition_penalty: 1.5
+
+optimization:
+  batch_size: 1
+  max_epochs: 200
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  shuffle: true
+  progress: true
+  early_stopping:
+    patience: 12
+    min_delta: 0.0
+
+loss:
+  name: frame_label_cross_entropy
+  segment_balance: false
