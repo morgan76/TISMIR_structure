@@ -24,6 +24,7 @@ beat = ["beat-this>=1.1.0", "soundfile>=0.12"]
 hf-audio = ["torch>=2.0", "transformers>=4.40", "librosa>=0.10", "soundfile>=0.12", "soxr>=0.3"]
 encodec = ["torch>=2.0", "transformers>=4.40", "librosa>=0.10", "soundfile>=0.12", "soxr>=0.3"]
 dac = ["torch>=2.0", "transformers>=4.44", "librosa>=0.10", "soundfile>=0.12", "soxr>=0.3"]
+panns = ["panns-inference>=0.1.0", "torch>=2.0", "librosa>=0.10"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,0 +1,24 @@
+dataset_manifest: data/manifests/example.jsonl
+output_root: data/embeddings/audio
+
+audio_encoder:
+  name: panns
+  checkpoint_path: null  # null downloads the default Cnn14 checkpoint
+  device: cpu
+  window_seconds: 1.0
+  hop_seconds: 1.0
+  embedding_dim: 2048
+  max_seconds: null
+
+beat_tracker:
+  name: beat_this
+  checkpoint_path: final0
+  device: cpu
+  dbn: false
+  float16: false
+
+pooling:
+  method: mean
+  empty: nearest
+  keep_dense: true
+  final_interval: track_duration
