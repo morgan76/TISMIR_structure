@@ -1,0 +1,55 @@
+# Cluster variant of configs/train/rwc_pop_split_baseline.yaml:
+# manifests/embeddings/outputs under /scratch/ick/music_structure/tismir_data.
+seed: 0
+device: auto
+output_dir: /scratch/ick/music_structure/tismir_data/outputs/train/rwc_pop_split_baseline
+
+model:
+  name: projection_baseline
+  audio:
+    input_dim: null
+    hidden_dim: 256
+    output_dim: 128
+  text:
+    input_dim: null
+    hidden_dim: 256
+    output_dim: 128
+  similarity:
+    temperature: 0.07
+    normalize: true
+
+data:
+  manifest: /scratch/ick/music_structure/tismir_data/manifests/rwc_pop_train.jsonl
+  audio_embedding_root: /scratch/ick/music_structure/tismir_data/embeddings/audio
+  audio_encoder: mert
+  text_embedding_root: /scratch/ick/music_structure/tismir_data/embeddings/text
+  text_encoder: sentence_transformers
+  audio_embedding_key: beat_sync
+  namespace: segment_open
+  candidate_label_strategy: track_labels
+  ignore_index: -100
+
+validation:
+  manifest: /scratch/ick/music_structure/tismir_data/manifests/rwc_pop_val.jsonl
+  segmentation:
+    enabled: true
+    limit: 20
+    monitor: F-measure@3.0
+    smoothing_window: 9
+    decoder: viterbi
+    transition_penalty: 1.5
+
+optimization:
+  batch_size: 1
+  max_epochs: 200
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  shuffle: true
+  progress: true
+  early_stopping:
+    patience: 12
+    min_delta: 0.0
+
+loss:
+  name: frame_label_cross_entropy
+  segment_balance: false

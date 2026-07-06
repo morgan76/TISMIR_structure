@@ -1,0 +1,25 @@
+# GPU variant of audio_mert_beat_this.yaml for SLURM jobs (B300 nodes).
+# Run via scripts/slurm/sm103_shim.py — nothing here disables cuDNN SDPA.
+dataset_manifest: data/manifests/example.jsonl
+output_root: /scratch/ick/music_structure/tismir_data/embeddings/audio
+
+audio_encoder:
+  name: mert
+  checkpoint: m-a-p/MERT-v1-95M
+  layer: -1
+  device: cuda
+  max_seconds: null
+  trust_remote_code: true
+
+beat_tracker:
+  name: beat_this
+  checkpoint_path: final0
+  device: cuda
+  dbn: false
+  float16: false
+
+pooling:
+  method: mean
+  empty: nearest
+  keep_dense: true
+  final_interval: track_duration
