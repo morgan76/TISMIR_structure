@@ -98,10 +98,15 @@ class SongFormerSslAudioEncoder:
 
     def _chunked(self, audio, feature_fn, chunk_samples):
         chunk_samples = max(chunk_samples, 1)
+        # The SSL front-ends STFT with n_fft=2048 (center-padded), which
+        # rejects inputs shorter than ~n_fft/2+1 samples. A trailing chunk of
+        # a few samples (track length just past a chunk boundary) would crash,
+        # so drop tails shorter than n_fft — under 0.1 s of audio.
+        min_samples = 2048
         parts = []
         for start in range(0, audio.shape[0], chunk_samples):
             segment = audio[start : start + chunk_samples]
-            if segment.shape[0] == 0:
+            if segment.shape[0] < min_samples:
                 continue
             parts.append(feature_fn(segment))
         return self._torch.cat(parts, dim=1)  # concat over time
