@@ -271,3 +271,14 @@ def _write_numbered_repeated_jams(path: Path) -> None:
     annotation.append(time=3.0, duration=1.0, value="verse2")
     jam.annotations.append(annotation)
     jam.save(str(path))
+
+
+def test_rwc_label_normalization_preset():
+    from tismir.preprocessing.label_normalization import normalize_label
+
+    config = {"name": "rwc", "normalize_whitespace": True}
+    assert normalize_label("nothing", config) == "silence"
+    assert normalize_label("verse A", config) == "verse A"
+    assert normalize_label("chorus B", config) == "chorus B"
+    assert normalize_label("pre-chorus", config) == "pre-chorus"
+    assert normalize_label("ending", config) == "ending"
