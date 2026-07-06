@@ -197,3 +197,15 @@ verbatim, and only case/space-normalized for prompts. `Code` is a SALAMI
 dictionary artifact (its own typo for `Coda`, see `codetta -> Code` in
 `funct_vocab_dictionary.txt`); it is preserved verbatim per the
 no-semantic-merge rule.
+
+## Audio sourcing status (2026-07-06)
+
+- **RWC (87)**: fully sourced. Zenodo record 18656623 provides all four RWC
+  zips; SALAMI (disc, track) joined to RWCID via rwc-annotations metadata.csv
+  (all 87 duration-validated < 3 s against the SALAMI annotation).
+- **Internet Archive (290/476 fetched, 272 with annotations)**: stored 2011
+  URLs are dead; `scripts/fetch_salami_internetarchive.py` recovers files via
+  the archive.org metadata API (61% yield; coverage CSV written next to the
+  audio). Remainder: items deleted or track files renamed beyond recognition.
+- **Codaich (778) / Isophonics (48)**: no sourceable audio.
+- Combined manifest: `scripts/build_salami_manifest.py` -> 359 usable tracks.
