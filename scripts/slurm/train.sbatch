@@ -13,7 +13,7 @@
 #
 #   sbatch scripts/slurm/train.sbatch configs/train/cluster/harmonix_split_adapter_rope.yaml
 set -euo pipefail
-source "${TISMIR_ROOT:-/scratch/ick/wt-slurm}/scripts/slurm/common.sh"
+source "${TISMIR_ROOT:-/scratch/ick/wt/slurm}/scripts/slurm/common.sh"
 
 CONFIG="${1:?usage: train.sbatch <train_config.yaml>}"
 

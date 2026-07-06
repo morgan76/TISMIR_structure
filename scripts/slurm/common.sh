@@ -1,6 +1,6 @@
 # Shared environment for TISMIR SLURM jobs. Source from sbatch scripts.
 # Override TISMIR_ROOT to run code from a different worktree/branch.
-export TISMIR_ROOT="${TISMIR_ROOT:-/scratch/ick/wt-slurm}"
+export TISMIR_ROOT="${TISMIR_ROOT:-/scratch/ick/wt/slurm}"
 export TISMIR_DATA="${TISMIR_DATA:-/scratch/ick/music_structure/tismir_data}"
 export TISMIR_GPU_VENV="${TISMIR_GPU_VENV:-/scratch/ick/music_structure/venv-gpu}"
 

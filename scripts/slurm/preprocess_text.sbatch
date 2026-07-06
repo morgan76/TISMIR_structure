@@ -11,7 +11,7 @@
 #
 #   sbatch scripts/slurm/preprocess_text.sbatch <manifest.jsonl> [text_config.yaml]
 set -euo pipefail
-source "${TISMIR_ROOT:-/scratch/ick/wt-slurm}/scripts/slurm/common.sh"
+source "${TISMIR_ROOT:-/scratch/ick/wt/slurm}/scripts/slurm/common.sh"
 
 MANIFEST="${1:?usage: preprocess_text.sbatch <manifest.jsonl> [config.yaml]}"
 CONFIG="${2:-configs/preprocessing/text.yaml}"

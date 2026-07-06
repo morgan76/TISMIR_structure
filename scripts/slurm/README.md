@@ -11,11 +11,11 @@ Cluster: B300 (Blackwell sm_103) GPU nodes, partitions `gpu` (7d) / `gpu_hp`
 | `/scratch/ick/music_structure/venv-gpu` | cu128 torch venv (created by `setup_gpu_venv.sh`) |
 | `/scratch/ick/music_structure/models` | HF / torch / checkpoint caches (`HF_HOME` etc.) |
 | `/scratch/ick/music_structure/tismir_data` | manifests, embeddings, outputs, SLURM logs |
-| `$TISMIR_ROOT` (default `/scratch/ick/wt-slurm`) | code checkout jobs run from (`PYTHONPATH=$TISMIR_ROOT/src`) |
+| `$TISMIR_ROOT` (default `/scratch/ick/wt/slurm`) | code checkout jobs run from (`PYTHONPATH=$TISMIR_ROOT/src`) |
 
 `common.sh` wires all of this; every sbatch script sources it. Override
 `TISMIR_ROOT` at submit time to run code from another worktree:
-`TISMIR_ROOT=/scratch/ick/wt-dataset-rwc_pop sbatch --export=ALL ...`
+`TISMIR_ROOT=/scratch/ick/wt/rwc_pop sbatch --export=ALL ...`
 
 ## sm_103 gotcha
 

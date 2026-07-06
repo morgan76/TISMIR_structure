@@ -15,7 +15,7 @@
 # Optional env overrides: AUDIO_ENCODER (mert), TEXT_ENCODER (sentence_transformers),
 # SMOOTHING (9), DECODER (viterbi), TRANSITION_PENALTY (1.5), MIN_SEG (3.0).
 set -euo pipefail
-source "${TISMIR_ROOT:-/scratch/ick/wt-slurm}/scripts/slurm/common.sh"
+source "${TISMIR_ROOT:-/scratch/ick/wt/slurm}/scripts/slurm/common.sh"
 
 CHECKPOINT="${1:?usage: infer_eval.sbatch <checkpoint.pt> <manifest.jsonl> <run_name>}"
 MANIFEST="${2:?missing reference manifest}"

@@ -18,6 +18,11 @@ def main() -> None:
     parser.add_argument("--output-root", default=None, help="Override output_root from the config.")
     parser.add_argument("--limit", type=int, default=None, help="Process only the first N tracks.")
     parser.add_argument("--skip-existing", action="store_true", help="Skip tracks with an existing beat_sync.npy.")
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="Override the device for both the audio encoder and beat tracker (e.g. cuda, cpu).",
+    )
     args = parser.parse_args()
 
     config = load_yaml(args.config)
@@ -29,6 +34,9 @@ def main() -> None:
 
     audio_config = dict(config.get("audio_encoder", {}))
     beat_config = dict(config.get("beat_tracker", {}))
+    if args.device is not None:
+        audio_config["device"] = args.device
+        beat_config["device"] = args.device
     audio_name = audio_config.pop("name")
     beat_name = beat_config.pop("name")
     audio_encoder = audio_encoders.build(audio_name, **audio_config)
