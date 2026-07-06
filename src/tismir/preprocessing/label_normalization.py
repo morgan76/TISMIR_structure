@@ -40,6 +40,16 @@ HARMONIX_ALIASES = {
 }
 
 
+# AIST RWC-MDB-P-2001 CHORUS labels are already readable words; the trailing
+# capital letters ("verse A", "chorus B") mark musically distinct variants of a
+# section type and are kept in the prompt text. Only `nothing` (non-section
+# regions) is rephrased for the text encoder — the raw target label stays
+# `nothing`, which the training pipeline already treats as silence-like.
+RWC_ALIASES = {
+    "nothing": "silence",
+}
+
+
 def normalize_label(label: str, config: dict[str, Any] | None = None) -> str:
     """Return text-facing label form while preserving the raw target label elsewhere."""
 
@@ -52,6 +62,8 @@ def normalize_label(label: str, config: dict[str, Any] | None = None) -> str:
         normalized = _normalize_harmonix_label(label, overrides=overrides)
     elif name == "generic":
         normalized = _normalize_generic_label(label, overrides=overrides)
+    elif name == "rwc":
+        normalized = _normalize_rwc_label(label, overrides=overrides)
     else:
         raise ValueError(f"Unknown label normalization preset: {name}")
 
@@ -62,6 +74,15 @@ def normalize_label(label: str, config: dict[str, Any] | None = None) -> str:
 
 def normalize_labels(labels: list[str], config: dict[str, Any] | None = None) -> list[str]:
     return [normalize_label(label, config=config) for label in labels]
+
+
+def _normalize_rwc_label(label: str, overrides: dict[str, str]) -> str:
+    key = " ".join(str(label).split()).lower()
+    if key in overrides:
+        return overrides[key]
+    if key in RWC_ALIASES:
+        return RWC_ALIASES[key]
+    return str(label)
 
 
 def _normalize_harmonix_label(label: str, overrides: dict[str, str]) -> str:

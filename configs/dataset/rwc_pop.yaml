@@ -1,0 +1,36 @@
+# RWC Popular Music (RWC-MDB-P-2001) — audio + section annotations.
+name: rwc_pop
+display_name: RWC Pop
+description: >
+  100-track RWC Popular Music subset. Since Feb 2026 both audio and
+  annotations are openly downloadable. AIST CHORUS files give the section
+  structure (intro / verse A-C / chorus / bridge / pre-chorus / ending),
+  with times in 10 ms units (divide by 100 for seconds).
+homepage: https://staff.aist.go.jp/m.goto/RWC-MDB/
+license: CC BY-NC 4.0 (Goto et al., AIST; "RWC Revisited", TISMIR 2026).
+audio_included: true
+
+steps:
+  # Section structure annotations (AIST CHORUS).
+  - kind: zip
+    url: https://staff.aist.go.jp/m.goto/RWC-MDB/AIST-Annotation/AIST.RWC-MDB-P-2001.CHORUS.zip
+    dest: rwc_pop_structure_aist
+    extracted_marker: AIST.RWC-MDB-P-2001.CHORUS
+
+  # Curated companion annotations (aligned MIDI, beats, chords, melody — not structure).
+  - kind: git
+    url: https://github.com/rwc-music/rwc-annotations.git
+    dest: rwc_pop_annotations
+
+  # Audio: 100 WAV tracks (~4.07 GB). Flagged audio so --skip-audio can skip it.
+  - kind: zip
+    audio: true
+    url: https://zenodo.org/records/18656623/files/RWC-P.zip
+    dest: rwc_pop_audio
+    extracted_marker: RWC-P
+
+manifest:
+  audio_dir: rwc_pop_audio/RWC-P
+  jams_dir: rwc_pop/jams                 # user-generated from AIST CHORUS TXT
+  audio_ext: .wav
+  jams_ext: .jams

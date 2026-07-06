@@ -1,0 +1,19 @@
+# RWC Pop text preprocessing. Raw AIST CHORUS labels stay as targets;
+# the `rwc` preset only rewrites `nothing` -> "silence" for prompt text.
+output_root: data/embeddings/text
+scope: dataset
+
+text_encoder:
+  name: sentence_transformers
+  checkpoint: intfloat/e5-base-v2
+  device: null
+  normalize_embeddings: true
+  batch_size: 32
+
+prompt:
+  mode: bare
+  normalize_whitespace: true
+
+label_normalization:
+  name: rwc
+  normalize_whitespace: true
