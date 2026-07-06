@@ -26,6 +26,8 @@ encodec = ["torch>=2.0", "transformers>=4.40", "librosa>=0.10", "soundfile>=0.12
 dac = ["torch>=2.0", "transformers>=4.44", "librosa>=0.10", "soundfile>=0.12", "soxr>=0.3"]
 panns = ["panns-inference>=0.1.0", "torch>=2.0", "librosa>=0.10"]
 passt = ["hear21passt>=0.0.19", "torch>=2.0", "librosa>=0.10"]
+# MusicFM itself is installed from source (github.com/minzwon/musicfm); this extra covers its runtime deps.
+musicfm = ["torch>=2.0", "einops>=0.6", "librosa>=0.10", "soundfile>=0.12", "soxr>=0.3"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
