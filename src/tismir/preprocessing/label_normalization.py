@@ -50,6 +50,19 @@ RWC_ALIASES = {
 }
 
 
+# Prompt-text aliases for SALAMI function labels that the generic rules do not
+# render as natural text. Keys are canonical keys (see _canonical_key). This is
+# deliberately minimal: it only rewrites notation, never merges semantically
+# distinct labels (Head / Theme / Main_Theme stay distinct). Casing and
+# underscore/hyphen variants ("silence"/"Silence", "Fade-out", "no_function",
+# "Main_Theme") are handled by the generic lowercase/despace rules.
+# See data/datasets/SALAMI_LABELS.md for the full mapping table.
+SALAMI_ALIASES = {
+    "&pause": "pause",  # SALAMI guide notation for a musical pause
+    "w/dialog": "with dialog",
+}
+
+
 def normalize_label(label: str, config: dict[str, Any] | None = None) -> str:
     """Return text-facing label form while preserving the raw target label elsewhere."""
 
@@ -60,6 +73,8 @@ def normalize_label(label: str, config: dict[str, Any] | None = None) -> str:
         normalized = label
     elif name == "harmonix":
         normalized = _normalize_harmonix_label(label, overrides=overrides)
+    elif name == "salami":
+        normalized = _normalize_salami_label(label, overrides=overrides)
     elif name == "generic":
         normalized = _normalize_generic_label(label, overrides=overrides)
     elif name == "rwc":
@@ -97,6 +112,15 @@ def _normalize_harmonix_label(label: str, overrides: dict[str, str]) -> str:
         return HARMONIX_ALIASES[key]
     if stem in HARMONIX_ALIASES:
         return _join_suffix(HARMONIX_ALIASES[stem], suffix)
+    return _normalize_generic_label(label, overrides=overrides)
+
+
+def _normalize_salami_label(label: str, overrides: dict[str, str]) -> str:
+    key = _canonical_key(label)
+    if key in overrides:
+        return overrides[key]
+    if key in SALAMI_ALIASES:
+        return SALAMI_ALIASES[key]
     return _normalize_generic_label(label, overrides=overrides)
 
 
