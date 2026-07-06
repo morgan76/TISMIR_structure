@@ -11,7 +11,9 @@ export TORCH_HOME="$_MODELS/torch"
 export XDG_CACHE_HOME="$_MODELS/cache"
 
 source "$TISMIR_GPU_VENV/bin/activate"
-export PYTHONPATH="$TISMIR_ROOT/src"
+# MusicFM is not on PyPI; its cloned source lives in the model cache and is
+# needed by the musicfm and songformer_ssl encoders. Harmless otherwise.
+export PYTHONPATH="$TISMIR_ROOT/src:$_MODELS/musicfm"
 cd "$TISMIR_ROOT"
 
 echo "Job ${SLURM_JOB_ID:-<none>} on $(hostname) | code: $TISMIR_ROOT | data: $TISMIR_DATA"
