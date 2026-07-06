@@ -12,9 +12,11 @@ VENV="${TISMIR_GPU_VENV:-/scratch/ick/music_structure/venv-gpu}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 uv venv --clear --python 3.12 "$VENV"
-# cu128 torch first, from the CUDA index (sm_103 support).
+# cu130 torch first, from the CUDA index. cu128 kernels run on sm_103 via PTX
+# compat, but cu128's NVRTC rejects sm_103 for runtime-JIT (jiterator) kernels
+# like complex abs() in torchaudio spectrograms — cu129+ runtime is required.
 uv pip install --python "$VENV/bin/python" \
-  --index-url https://download.pytorch.org/whl/cu128 \
+  --index-url https://download.pytorch.org/whl/cu130 \
   torch torchaudio
 # Project + extras (deps resolve from PyPI; torch req already satisfied).
 uv pip install --python "$VENV/bin/python" \
