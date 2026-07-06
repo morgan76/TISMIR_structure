@@ -1,0 +1,226 @@
+{
+  "dataset": "rwc_pop (Zenodo RWC-P audio + AIST CHORUS annotations, 16 labels incl. variant letters)",
+  "splits": {
+    "train": 80,
+    "val": 20,
+    "source": "split_manifest.py, ratio 0.8/0.2, seed 0"
+  },
+  "date": "2026-07-06",
+  "audio_encoder": "mert (m-a-p/MERT-v1-95M, layer -1, beat_sync via beat_this)",
+  "text_encoder": "sentence_transformers (intfloat/e5-base-v2)",
+  "checkpoint": "best_segmentation_checkpoint.pt (monitor: F-measure@3.0 on val subset)",
+  "decoding": {
+    "smoothing_window": 9,
+    "decoder": "viterbi",
+    "transition_penalty": 1.5,
+    "min_segment_duration": 3.0,
+    "candidate_label_strategy": "track_labels"
+  },
+  "evaluation": "mir_eval.segment.evaluate, intervals adjusted to duration, trim=True",
+  "runs": {
+    "projection_baseline": {
+      "train_config": "configs/train/cluster/rwc_pop_split_baseline.yaml",
+      "training": {
+        "stopped_epoch": 18,
+        "best_val_loss_epoch": 6,
+        "best_val_F-measure@3.0_subset20": 0.565248,
+        "best_segmentation_epoch": 14
+      },
+      "val": {
+        "num_tracks": 20,
+        "summary": {
+          "Adjusted Mutual Information": {
+            "mean": 0.47486932257081776,
+            "std": 0.08353411775609416
+          },
+          "Adjusted Rand Index": {
+            "mean": 0.39716425973684455,
+            "std": 0.1151535909323182
+          },
+          "Est-to-ref deviation": {
+            "mean": 2.1740004999999987,
+            "std": 0.9679748917261473
+          },
+          "F-measure@0.5": {
+            "mean": 0.13524520650754063,
+            "std": 0.0953227678551187
+          },
+          "F-measure@3.0": {
+            "mean": 0.5253259458821257,
+            "std": 0.0877825486030245
+          },
+          "Mutual Information": {
+            "mean": 0.9327885022589694,
+            "std": 0.19475602770816577
+          },
+          "NCE F-measure": {
+            "mean": 0.6311794880061474,
+            "std": 0.0653234147417013
+          },
+          "NCE Over": {
+            "mean": 0.7928220534184696,
+            "std": 0.07121485922064724
+          },
+          "NCE Under": {
+            "mean": 0.5291991905290018,
+            "std": 0.07860791614203147
+          },
+          "Normalized Mutual Information": {
+            "mean": 0.582678349495064,
+            "std": 0.07851336535597067
+          },
+          "Pairwise F-measure": {
+            "mean": 0.5299004944224476,
+            "std": 0.08166743114034992
+          },
+          "Pairwise Precision": {
+            "mean": 0.40881094685436886,
+            "std": 0.0920088932546436
+          },
+          "Pairwise Recall": {
+            "mean": 0.7827049543975078,
+            "std": 0.10549027283738023
+          },
+          "Precision@0.5": {
+            "mean": 0.15345492007992007,
+            "std": 0.11799510742309566
+          },
+          "Precision@3.0": {
+            "mean": 0.5971249028749028,
+            "std": 0.14745650607051805
+          },
+          "Rand Index": {
+            "mean": 0.7666184829066325,
+            "std": 0.07134868225220768
+          },
+          "Recall@0.5": {
+            "mean": 0.12530765781346276,
+            "std": 0.09023292342852324
+          },
+          "Recall@3.0": {
+            "mean": 0.4830795191650455,
+            "std": 0.09085908079406886
+          },
+          "Ref-to-est deviation": {
+            "mean": 4.161749250000001,
+            "std": 3.8764986386087745
+          },
+          "V Precision": {
+            "mean": 0.7159828227271848,
+            "std": 0.09557924977606652
+          },
+          "V Recall": {
+            "mean": 0.47696001599875304,
+            "std": 0.08351573999888944
+          },
+          "V-measure": {
+            "mean": 0.5693425822526179,
+            "std": 0.0796841939601661
+          }
+        }
+      }
+    },
+    "temporal_text_adapter_rope": {
+      "train_config": "configs/train/cluster/rwc_pop_split_adapter_rope.yaml",
+      "training": {
+        "stopped_epoch": 27,
+        "best_val_loss_epoch": 15,
+        "best_val_F-measure@3.0_subset20": 0.559571,
+        "best_segmentation_epoch": 27
+      },
+      "val": {
+        "num_tracks": 20,
+        "summary": {
+          "Adjusted Mutual Information": {
+            "mean": 0.6205017133453599,
+            "std": 0.09400652193237985
+          },
+          "Adjusted Rand Index": {
+            "mean": 0.4743036502201122,
+            "std": 0.1424281628478325
+          },
+          "Est-to-ref deviation": {
+            "mean": 2.8310002499999998,
+            "std": 1.2847524146703082
+          },
+          "F-measure@0.5": {
+            "mean": 0.09339539642420898,
+            "std": 0.08026308624282434
+          },
+          "F-measure@3.0": {
+            "mean": 0.4917293123335268,
+            "std": 0.17372521505302865
+          },
+          "Mutual Information": {
+            "mean": 1.2276452961485114,
+            "std": 0.24745895723300712
+          },
+          "NCE F-measure": {
+            "mean": 0.6997673531513334,
+            "std": 0.07253157820168014
+          },
+          "NCE Over": {
+            "mean": 0.7420452817190124,
+            "std": 0.07201825706497438
+          },
+          "NCE Under": {
+            "mean": 0.6646798048388652,
+            "std": 0.0813728049126637
+          },
+          "Normalized Mutual Information": {
+            "mean": 0.655791509529144,
+            "std": 0.09123584769107601
+          },
+          "Pairwise F-measure": {
+            "mean": 0.5715517687288963,
+            "std": 0.10986221873086405
+          },
+          "Pairwise Precision": {
+            "mean": 0.5258944093759826,
+            "std": 0.10857960782849158
+          },
+          "Pairwise Recall": {
+            "mean": 0.6382507234758613,
+            "std": 0.1329340789043681
+          },
+          "Precision@0.5": {
+            "mean": 0.10305804575541418,
+            "std": 0.08812048475721196
+          },
+          "Precision@3.0": {
+            "mean": 0.5464414094677252,
+            "std": 0.19083932939975393
+          },
+          "Rand Index": {
+            "mean": 0.8393596780452921,
+            "std": 0.0676657324189464
+          },
+          "Recall@0.5": {
+            "mean": 0.0860448832643105,
+            "std": 0.07448639760393333
+          },
+          "Recall@3.0": {
+            "mean": 0.452203948657122,
+            "std": 0.17081185578761213
+          },
+          "Ref-to-est deviation": {
+            "mean": 4.01899925,
+            "std": 2.090624413546869
+          },
+          "V Precision": {
+            "mean": 0.6877192428447101,
+            "std": 0.093716740692506
+          },
+          "V Recall": {
+            "mean": 0.6262996880048237,
+            "std": 0.0942987018278476
+          },
+          "V-measure": {
+            "mean": 0.6545789184689459,
+            "std": 0.09163619224074582
+          }
+        }
+      }
+    }
+  }
+}
