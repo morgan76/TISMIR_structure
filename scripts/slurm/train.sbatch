@@ -13,10 +13,12 @@
 #
 #   sbatch scripts/slurm/train.sbatch configs/train/cluster/harmonix_split_adapter_rope.yaml
 set -euo pipefail
-source "${TISMIR_ROOT:-/scratch/ick/wt/slurm}/scripts/slurm/common.sh"
+# SLURM tooling always lives on the infra/slurm worktree; TISMIR_ROOT
+# (set in common.sh) selects which branch worktree the *pipeline code* runs from.
+source /scratch/ick/wt/slurm/scripts/slurm/common.sh
 
 CONFIG="${1:?usage: train.sbatch <train_config.yaml>}"
 
 # Shim: the temporal_text_adapter uses nn.MultiheadAttention -> SDPA -> would
 # hit the broken cuDNN backend on sm_103.
-srun python scripts/slurm/sm103_shim.py scripts/train.py --config "$CONFIG"
+srun python /scratch/ick/wt/slurm/scripts/slurm/sm103_shim.py scripts/train.py --config "$CONFIG"

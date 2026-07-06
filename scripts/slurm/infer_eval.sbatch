@@ -15,7 +15,9 @@
 # Optional env overrides: AUDIO_ENCODER (mert), TEXT_ENCODER (sentence_transformers),
 # SMOOTHING (9), DECODER (viterbi), TRANSITION_PENALTY (1.5), MIN_SEG (3.0).
 set -euo pipefail
-source "${TISMIR_ROOT:-/scratch/ick/wt/slurm}/scripts/slurm/common.sh"
+# SLURM tooling always lives on the infra/slurm worktree; TISMIR_ROOT
+# (set in common.sh) selects which branch worktree the *pipeline code* runs from.
+source /scratch/ick/wt/slurm/scripts/slurm/common.sh
 
 CHECKPOINT="${1:?usage: infer_eval.sbatch <checkpoint.pt> <manifest.jsonl> <run_name>}"
 MANIFEST="${2:?missing reference manifest}"
@@ -32,7 +34,7 @@ INFER_DIR="$TISMIR_DATA/outputs/infer/$RUN_NAME"
 EVAL_JSON="$TISMIR_DATA/outputs/eval/$RUN_NAME.json"
 mkdir -p "$(dirname "$EVAL_JSON")"
 
-srun python scripts/slurm/sm103_shim.py scripts/infer.py \
+srun python /scratch/ick/wt/slurm/scripts/slurm/sm103_shim.py scripts/infer.py \
   --checkpoint "$CHECKPOINT" \
   --manifest "$MANIFEST" \
   --audio-embedding-root "$TISMIR_DATA/embeddings/audio" \

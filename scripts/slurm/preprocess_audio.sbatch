@@ -13,14 +13,16 @@
 #
 #   sbatch scripts/slurm/preprocess_audio.sbatch <manifest.jsonl> [audio_config.yaml]
 set -euo pipefail
-source "${TISMIR_ROOT:-/scratch/ick/wt/slurm}/scripts/slurm/common.sh"
+# SLURM tooling always lives on the infra/slurm worktree; TISMIR_ROOT
+# (set in common.sh) selects which branch worktree the *pipeline code* runs from.
+source /scratch/ick/wt/slurm/scripts/slurm/common.sh
 
 MANIFEST="${1:?usage: preprocess_audio.sbatch <manifest.jsonl> [config.yaml]}"
 CONFIG="${2:-configs/preprocessing/audio_mert_beat_this_cuda.yaml}"
 
 # sm103_shim disables the cuDNN SDPA backend (broken on B300); MERT/BeatThis
 # attention then uses the mem-efficient/math backends.
-srun python scripts/slurm/sm103_shim.py scripts/preprocess_audio.py \
+srun python /scratch/ick/wt/slurm/scripts/slurm/sm103_shim.py scripts/preprocess_audio.py \
   --config "$CONFIG" \
   --manifest "$MANIFEST" \
   --output-root "$TISMIR_DATA/embeddings/audio" \
