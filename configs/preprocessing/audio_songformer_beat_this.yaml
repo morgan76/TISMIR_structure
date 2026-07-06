@@ -1,0 +1,29 @@
+dataset_manifest: data/manifests/example.jsonl
+output_root: data/embeddings/audio
+
+audio_encoder:
+  name: songformer_ssl
+  # MusicFM from source (github.com/minzwon/musicfm) + downloaded checkpoints:
+  musicfm_stat_path: /path/to/musicfm/data/msd_stats.json
+  musicfm_model_path: /path/to/musicfm/data/pretrained_msd.pt
+  # MuQ from PyPI (`pip install muq`):
+  muq_checkpoint: OpenMuQ/MuQ-large-msd-iter
+  layer: 10
+  device: cpu
+  chunk_seconds: 30.0
+  long_window_seconds: 420.0
+  is_flash: false
+  max_seconds: null
+
+beat_tracker:
+  name: beat_this
+  checkpoint_path: final0
+  device: cpu
+  dbn: false
+  float16: false
+
+pooling:
+  method: mean
+  empty: nearest
+  keep_dense: true
+  final_interval: track_duration
