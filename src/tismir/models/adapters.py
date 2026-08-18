@@ -32,6 +32,90 @@ class SinusoidalPositionalEncoding(nn.Module):
         return values + encoding.unsqueeze(0)
 
 
+class SegmentAttentionPool(nn.Module):
+    """Learnable attention pool from dense frames to one vector per beat segment.
+
+    Given dense frames ``[B, F, D]`` and per-frame segment ids ``[B, F]`` (each in
+    ``[0, num_beats)``; padding frames use ``-1``), this pools the frames that
+    fall in each beat into a single ``[B, num_beats, D]`` vector using a learned
+    query. Attention is computed with a segment-masked softmax, so frames only
+    compete against other frames in the same beat. Beats with no frames pool to a
+    zero vector (they are covered by the downstream beat mask).
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 1,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if dim <= 0:
+            raise ValueError("dim must be positive")
+        if num_heads <= 0 or dim % num_heads != 0:
+            raise ValueError("dim must be divisible by a positive num_heads")
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.key_projection = nn.Linear(dim, dim)
+        self.value_projection = nn.Linear(dim, dim)
+        self.query = nn.Parameter(torch.zeros(num_heads, self.head_dim))
+        nn.init.normal_(self.query, std=self.head_dim ** -0.5)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, frames, segment_ids, num_beats: int, frame_mask=None):
+        batch_size, num_frames, dim = frames.shape
+        if dim != self.dim:
+            raise ValueError(f"frame dim {dim} does not match pool dim {self.dim}")
+
+        keys = self.key_projection(frames).view(
+            batch_size, num_frames, self.num_heads, self.head_dim
+        )
+        values = self.value_projection(frames).view(
+            batch_size, num_frames, self.num_heads, self.head_dim
+        )
+        # Per-frame, per-head attention score against the learned query: [B, H, F].
+        scores = torch.einsum("bfhd,hd->bhf", keys, self.query) * (self.head_dim ** -0.5)
+
+        # Valid frames map to a real beat; everything else goes to a dump bucket
+        # ``num_beats`` that is dropped at the end. This is a segment-softmax done
+        # with scatter ops, so it never materialises a [beats x frames] matrix.
+        valid = (segment_ids >= 0) & (segment_ids < num_beats)
+        if frame_mask is not None:
+            valid = valid & frame_mask.bool()
+        dump = num_beats
+        safe_segments = torch.where(valid, segment_ids, torch.full_like(segment_ids, dump))
+        valid_h = valid[:, None, :].expand(-1, self.num_heads, -1)
+        index = safe_segments[:, None, :].expand(-1, self.num_heads, -1)
+
+        neg_inf = torch.finfo(scores.dtype).min
+        masked_scores = scores.masked_fill(~valid_h, neg_inf)
+
+        # Per-segment max for numerically stable softmax, gathered back to frames.
+        seg_max = scores.new_full((batch_size, self.num_heads, num_beats + 1), neg_inf)
+        seg_max = seg_max.scatter_reduce(2, index, masked_scores, reduce="amax", include_self=True)
+        seg_max_per_frame = seg_max.gather(2, index)
+
+        shifted = torch.where(valid_h, masked_scores - seg_max_per_frame, torch.zeros_like(scores))
+        exp_scores = torch.exp(shifted).masked_fill(~valid_h, 0.0)
+
+        seg_sum = scores.new_zeros((batch_size, self.num_heads, num_beats + 1))
+        seg_sum = seg_sum.scatter_add(2, index, exp_scores)
+        denom = seg_sum.gather(2, index).clamp_min(torch.finfo(scores.dtype).tiny)
+        weights = self.dropout(exp_scores / denom)  # [B, H, F]
+
+        weighted_values = weights.unsqueeze(-1) * values.permute(0, 2, 1, 3)  # [B, H, F, hd]
+        pooled = weighted_values.new_zeros(
+            (batch_size, self.num_heads, num_beats + 1, self.head_dim)
+        )
+        scatter_index = index.unsqueeze(-1).expand(-1, -1, -1, self.head_dim)
+        pooled = pooled.scatter_add(2, scatter_index, weighted_values)
+        pooled = pooled[:, :, :num_beats, :]  # drop the dump bucket
+
+        # [B, H, num_beats, hd] -> [B, num_beats, dim]
+        return pooled.permute(0, 2, 1, 3).reshape(batch_size, num_beats, self.dim)
+
+
 class TemporalTextAdapterBaseline(nn.Module):
     """Transformer-adapter baseline for open-vocabulary frame-label scoring."""
 
@@ -64,6 +148,7 @@ class TemporalTextAdapterBaseline(nn.Module):
         structure_pair_hidden_dim: int | None = None,
         temperature: float = 0.07,
         normalize: bool = True,
+        beat_pool: dict | None = None,
     ) -> None:
         super().__init__()
         if temperature <= 0:
@@ -79,6 +164,16 @@ class TemporalTextAdapterBaseline(nn.Module):
 
         position_type = _resolve_position_type(use_audio_positions, audio_position_type)
         boundary_head_config = _boundary_head_config(boundary_head)
+        beat_pool_config = _beat_pool_config(beat_pool)
+        self.beat_pool = (
+            None
+            if not beat_pool_config["enabled"]
+            else SegmentAttentionPool(
+                dim=audio_dim,
+                num_heads=int(beat_pool_config["num_heads"]),
+                dropout=float(beat_pool_config["dropout"]),
+            )
+        )
         self.audio_projection = _build_projection(audio_dim, audio_hidden_dim, model_dim)
         self.text_projection = _build_projection(text_dim, text_hidden_dim, model_dim)
         self.audio_positions = (
@@ -201,14 +296,46 @@ class TemporalTextAdapterBaseline(nn.Module):
             )
         )
 
-    def forward(self, audio, text, audio_mask=None):
+    def forward(
+        self,
+        audio,
+        text,
+        audio_mask=None,
+        frames=None,
+        frame_segment_ids=None,
+        frame_mask=None,
+    ):
         """Return frame-label logits."""
 
-        return self.extract_features(audio, text, audio_mask=audio_mask)["logits"]
+        return self.extract_features(
+            audio,
+            text,
+            audio_mask=audio_mask,
+            frames=frames,
+            frame_segment_ids=frame_segment_ids,
+            frame_mask=frame_mask,
+        )["logits"]
 
-    def extract_features(self, audio, text, audio_mask=None):
+    def extract_features(
+        self,
+        audio,
+        text,
+        audio_mask=None,
+        frames=None,
+        frame_segment_ids=None,
+        frame_mask=None,
+    ):
         """Return final token embeddings and frame-label logits."""
 
+        if self.beat_pool is not None and frames is not None:
+            if frame_segment_ids is None:
+                raise ValueError("beat_pool requires frame_segment_ids when frames are provided")
+            audio = self.beat_pool(
+                frames,
+                frame_segment_ids,
+                num_beats=audio.shape[1],
+                frame_mask=frame_mask,
+            )
         audio_z = self.audio_projection(audio)
         audio_z = self.audio_positions(audio_z)
         padding_mask = None if audio_mask is None else ~audio_mask.bool()
@@ -1115,6 +1242,22 @@ def _boundary_head_config(value: dict | None) -> dict:
     return {
         "enabled": True,
         "hidden_dim": None if hidden_dim is None else int(hidden_dim),
+    }
+
+
+def _beat_pool_config(value: dict | None) -> dict:
+    if value in (None, False):
+        return {"enabled": False, "num_heads": 1, "dropout": 0.0}
+    if value is True:
+        value = {}
+    if not isinstance(value, dict):
+        raise TypeError("audio.beat_pool must be a mapping, boolean, or null")
+    if not bool(value.get("enabled", True)):
+        return {"enabled": False, "num_heads": 1, "dropout": 0.0}
+    return {
+        "enabled": True,
+        "num_heads": int(value.get("num_heads", 1)),
+        "dropout": float(value.get("dropout", 0.0)),
     }
 
 

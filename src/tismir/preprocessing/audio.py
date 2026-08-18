@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,11 @@ from tismir.data.schemas import Track
 from tismir.encoders.audio import audio_encoders
 from tismir.encoders.beats import BeatTrackingResult, beat_trackers
 from tismir.io import save_array, save_json
-from tismir.preprocessing.beat_sync import build_beat_intervals, mean_pool_to_intervals
+from tismir.preprocessing.beat_sync import (
+    POOLING_METHODS,
+    build_beat_intervals,
+    pool_frames_to_intervals,
+)
 
 
 @dataclass(frozen=True)
@@ -55,10 +60,56 @@ def preprocess_track_audio_with_backends(
 ) -> AudioPreprocessingResult:
     """Precompute one track using already-constructed encoder/tracker objects."""
 
-    pooling = {} if pooling is None else dict(pooling)
-    method = pooling.get("method", "mean")
-    if method != "mean":
-        raise ValueError(f"Unsupported pooling method: {method}")
+    dense, beat_result, duration, intervals = _encode_and_build_intervals(
+        track, audio_encoder, beat_tracker
+    )
+    return _pool_and_write(
+        track=track,
+        output_root=output_root,
+        audio_encoder_name=audio_encoder_name,
+        dense=dense,
+        beat_result=beat_result,
+        duration=duration,
+        intervals=intervals,
+        pooling=pooling,
+    )
+
+
+def preprocess_track_audio_multi_pool(
+    track: Track,
+    variants: Sequence[tuple[str | Path, dict[str, Any] | None]],
+    audio_encoder_name: str,
+    audio_encoder,
+    beat_tracker,
+) -> list[AudioPreprocessingResult]:
+    """Encode a track once and write several pooling variants from the same dense frames.
+
+    ``variants`` is a sequence of ``(output_root, pooling)`` pairs. The audio is
+    passed through the (expensive) encoder and beat tracker a single time; each
+    variant only re-runs the cheap pooling + save step. This makes an N-method
+    sweep cost roughly one encode instead of N.
+    """
+
+    dense, beat_result, duration, intervals = _encode_and_build_intervals(
+        track, audio_encoder, beat_tracker
+    )
+    return [
+        _pool_and_write(
+            track=track,
+            output_root=output_root,
+            audio_encoder_name=audio_encoder_name,
+            dense=dense,
+            beat_result=beat_result,
+            duration=duration,
+            intervals=intervals,
+            pooling=pooling,
+        )
+        for output_root, pooling in variants
+    ]
+
+
+def _encode_and_build_intervals(track: Track, audio_encoder, beat_tracker):
+    """Run the encoder + beat tracker once and build duration-trimmed beat intervals."""
 
     dense = audio_encoder.encode(track.audio_path)
     beat_result = beat_tracker.track(track.audio_path)
@@ -68,13 +119,38 @@ def preprocess_track_audio_with_backends(
     if duration <= 0:
         raise ValueError(f"Could not determine duration for {track.audio_path}")
     beat_result = _trim_beats_to_duration(beat_result, duration)
-
     intervals = build_beat_intervals(beat_result.beats, track_duration=duration)
-    beat_sync = mean_pool_to_intervals(
+    return dense, beat_result, duration, intervals
+
+
+def _pool_and_write(
+    track: Track,
+    output_root: str | Path,
+    audio_encoder_name: str,
+    dense,
+    beat_result: BeatTrackingResult,
+    duration: float,
+    intervals,
+    pooling: dict[str, Any] | None,
+) -> AudioPreprocessingResult:
+    """Pool the shared dense frames for one method and write the output arrays."""
+
+    pooling = {} if pooling is None else dict(pooling)
+    method = pooling.get("method", "mean")
+    if method not in POOLING_METHODS:
+        raise ValueError(f"Unsupported pooling method: {method}. Choose from {POOLING_METHODS}.")
+    empty = pooling.get("empty", "nearest")
+    temperature = float(pooling.get("temperature", 1.0))
+    stats = pooling.get("stats") if method == "multi_stat" else None
+
+    beat_sync = pool_frames_to_intervals(
         dense.embeddings,
         dense.times,
         intervals,
-        empty=pooling.get("empty", "nearest"),
+        method=method,
+        empty=empty,
+        temperature=temperature,
+        stats=stats,
     )
 
     output_dir = Path(output_root) / audio_encoder_name / track.dataset / track.track_id
@@ -99,7 +175,9 @@ def preprocess_track_audio_with_backends(
         "beat_tracker": beat_result.metadata,
         "pooling": {
             "method": method,
-            "empty": pooling.get("empty", "nearest"),
+            "empty": empty,
+            "temperature": temperature,
+            "stats": list(stats) if stats is not None else None,
             "keep_dense": keep_dense,
             "interval_convention": "[beat_i, beat_{i+1}), final interval ends at track duration",
         },

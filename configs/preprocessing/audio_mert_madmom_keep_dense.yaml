@@ -1,0 +1,27 @@
+dataset_manifest: data/manifests/harmonix_bigvgan.local.jsonl
+output_root: data/embeddings/audio_dense
+
+audio_encoder:
+  name: mert
+  checkpoint: m-a-p/MERT-v1-95M
+  layer: -1
+  device: cpu
+  max_seconds: null
+  trust_remote_code: true
+
+beat_tracker:
+  name: madmom
+  estimate_downbeats: true
+  fps: 100
+  min_bpm: 55.0
+  max_bpm: 215.0
+  beats_per_bar: [3, 4]
+
+# keep_dense: true saves dense.npy / dense_times.npy for the learnable
+# in-model attention pool (A2). beat_sync.npy is still written (mean pooled)
+# so this cache also works with the default beat-sync training path.
+pooling:
+  method: mean
+  empty: nearest
+  keep_dense: true
+  final_interval: track_duration

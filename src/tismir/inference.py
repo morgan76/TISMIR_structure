@@ -91,13 +91,14 @@ def run_baseline_inference(
         with torch.inference_mode():
             audio = torch.from_numpy(example.audio).unsqueeze(0).to(device_obj)
             text = torch.from_numpy(example.text).to(device_obj)
+            frame_kwargs = _example_frame_tensors(example, torch, device_obj)
             if hasattr(model, "extract_features"):
-                features = model.extract_features(audio, text)
+                features = model.extract_features(audio, text, **frame_kwargs)
                 logits = features["logits"][0].detach().cpu().numpy()
                 boundary_logits = _last_boundary_logits(features)
                 boundary_probabilities = _sigmoid(boundary_logits)
             else:
-                logits = model(audio, text)[0].detach().cpu().numpy()
+                logits = model(audio, text, **frame_kwargs)[0].detach().cpu().numpy()
                 boundary_logits = None
                 boundary_probabilities = None
 
@@ -211,6 +212,27 @@ def _softmax(values: np.ndarray, axis: int) -> np.ndarray:
     values = values - values.max(axis=axis, keepdims=True)
     exp = np.exp(values)
     return exp / exp.sum(axis=axis, keepdims=True)
+
+
+def _example_frame_tensors(example, torch, device) -> dict[str, Any]:
+    """Build single-example dense-frame tensors for models with a learnable beat pool.
+
+    Returns an empty dict for the default beat-sync path (no dense frames), so it
+    can always be splatted into the model call.
+    """
+
+    if getattr(example, "frames", None) is None:
+        return {}
+    frames = torch.from_numpy(example.frames).unsqueeze(0).to(device)
+    frame_segment_ids = (
+        torch.from_numpy(example.frame_segment_ids.astype(np.int64)).unsqueeze(0).to(device)
+    )
+    frame_mask = torch.ones(frames.shape[:2], dtype=torch.bool, device=device)
+    return {
+        "frames": frames,
+        "frame_segment_ids": frame_segment_ids,
+        "frame_mask": frame_mask,
+    }
 
 
 def _last_boundary_logits(features: dict[str, Any]) -> np.ndarray | None:

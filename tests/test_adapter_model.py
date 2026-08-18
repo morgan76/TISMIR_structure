@@ -1,7 +1,85 @@
 import torch
 
 from tismir.models import TemporalTextAdapterBaseline, build_model
-from tismir.models.adapters import TransformerIdentity, _apply_rope
+from tismir.models.adapters import SegmentAttentionPool, TransformerIdentity, _apply_rope
+
+
+def test_segment_attention_pool_shapes_and_single_frame_beat():
+    pool = SegmentAttentionPool(dim=4, num_heads=2)
+    frames = torch.randn(1, 5, 4)
+    # beat 0 -> frames {0,1}; beat 1 -> frame {3}; frames 2,4 are padding.
+    segment_ids = torch.tensor([[0, 0, -1, 1, -1]])
+    frame_mask = torch.tensor([[True, True, False, True, False]])
+
+    pooled = pool(frames, segment_ids, num_beats=2, frame_mask=frame_mask)
+    assert pooled.shape == (1, 2, 4)
+    # A beat with a single frame just returns that frame's projected value.
+    expected_beat1 = pool.value_projection(frames[:, 3])
+    torch.testing.assert_close(pooled[:, 1], expected_beat1)
+
+
+def test_segment_attention_pool_empty_beat_is_zero_and_finite():
+    pool = SegmentAttentionPool(dim=4)
+    frames = torch.randn(1, 3, 4)
+    segment_ids = torch.tensor([[0, 0, 0]])  # nothing maps to beat 1
+    pooled = pool(frames, segment_ids, num_beats=2)
+    assert torch.isfinite(pooled).all()
+    torch.testing.assert_close(pooled[0, 1], torch.zeros(4))
+
+
+def test_segment_attention_pool_weights_are_convex_over_segment():
+    # With num_heads=1 and identity-ish projections, the beat output is a convex
+    # combination of its frames, so it lies within their elementwise min/max.
+    torch.manual_seed(0)
+    pool = SegmentAttentionPool(dim=3, num_heads=1)
+    frames = torch.randn(1, 4, 3)
+    segment_ids = torch.tensor([[0, 0, 0, 0]])
+    pooled = pool(frames, segment_ids, num_beats=1)
+    values = pool.value_projection(frames)
+    assert torch.all(pooled <= values.amax(dim=1) + 1e-5)
+    assert torch.all(pooled >= values.amin(dim=1) - 1e-5)
+
+
+def test_beat_pool_model_forward_and_gradients():
+    model = build_model(
+        {
+            "name": "temporal_text_adapter",
+            "audio": {"num_layers": 1, "beat_pool": {"enabled": True, "num_heads": 2}},
+            "text": {"num_layers": 1},
+            "adapter": {"model_dim": 8, "num_heads": 2, "feedforward_dim": 16, "dropout": 0.0},
+        },
+        audio_dim=4,
+        text_dim=5,
+    )
+    assert model.beat_pool is not None
+    audio = torch.randn(2, 3, 4)  # per-beat array (num_beats = 3)
+    text = torch.randn(3, 5)
+    frames = torch.randn(2, 10, 4)
+    segment_ids = torch.randint(0, 3, (2, 10))
+    frame_mask = torch.ones(2, 10, dtype=torch.bool)
+    mask = torch.ones(2, 3, dtype=torch.bool)
+
+    logits = model(
+        audio,
+        text,
+        audio_mask=mask,
+        frames=frames,
+        frame_segment_ids=segment_ids,
+        frame_mask=frame_mask,
+    )
+    assert logits.shape == (2, 3, 3)
+    logits.sum().backward()
+    assert model.beat_pool.query.grad is not None
+    assert torch.any(model.beat_pool.query.grad != 0)
+
+
+def test_beat_pool_disabled_by_default():
+    model = build_model(
+        {"name": "temporal_text_adapter", "audio": {"num_layers": 1}, "text": {"num_layers": 1}},
+        audio_dim=4,
+        text_dim=5,
+    )
+    assert model.beat_pool is None
 
 
 def test_temporal_text_adapter_logits_shape_with_shared_labels():

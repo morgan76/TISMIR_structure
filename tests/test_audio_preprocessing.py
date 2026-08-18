@@ -44,6 +44,51 @@ def test_preprocess_track_audio_writes_expected_arrays(tmp_path):
     assert metadata["pooling"]["method"] == "mean"
 
 
+def test_preprocess_track_audio_multi_stat_pooling_widens_dim_and_records_metadata(tmp_path):
+    audio_path = tmp_path / "audio.wav"
+    _write_silent_wav(audio_path, duration=2.0, sample_rate=8000)
+    jams_path = tmp_path / "audio.jams"
+    jams_path.write_text("{}", encoding="utf-8")
+    track = Track(
+        track_id="track",
+        audio_path=audio_path,
+        jams_path=jams_path,
+        dataset="dataset",
+        split="train",
+    )
+
+    result = preprocess_track_audio(
+        track=track,
+        output_root=tmp_path / "embeddings",
+        audio_encoder_name="placeholder",
+        audio_encoder_params={"output_dim": 4, "frame_rate": 4.0},
+        beat_tracker_name="uniform",
+        beat_tracker_params={"beat_period": 0.5, "estimate_downbeats": True},
+        pooling={
+            "method": "multi_stat",
+            "stats": ["mean", "max", "std"],
+            "empty": "zeros",
+            "keep_dense": False,
+        },
+    )
+
+    output_dir = Path(result.output_dir)
+    # multi_stat concatenates 3 statistics -> 3x the encoder dim.
+    assert result.beat_sync_shape == (4, 12)
+    assert np.load(output_dir / "beat_sync.npy").shape == (4, 12)
+    # keep_dense=False -> dense arrays are not written.
+    assert not (output_dir / "dense.npy").exists()
+
+    metadata = json.loads((output_dir / "metadata.json").read_text(encoding="utf-8"))
+    pooling = metadata["pooling"]
+    assert pooling["method"] == "multi_stat"
+    assert pooling["stats"] == ["mean", "max", "std"]
+    assert pooling["empty"] == "zeros"
+    assert pooling["temperature"] == 1.0
+    assert pooling["keep_dense"] is False
+    assert metadata["outputs"]["beat_sync_shape"] == [4, 12]
+
+
 def test_preprocess_track_audio_trims_beats_to_embedding_duration(tmp_path):
     trimmed = _trim_beats_to_duration(
         BeatTrackingResult(

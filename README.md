@@ -658,3 +658,111 @@ Once audio embeddings are available, train the initial full-split baselines:
 python scripts/train.py --config configs/train/harmonix_split_baseline.yaml
 python scripts/train.py --config configs/train/harmonix_split_adapter_rope.yaml
 ```
+
+## Beat-Pooling Experiments
+
+MERT frames are pooled to one vector per beat before training. Beyond the
+default `mean`, the pooling family in `src/tismir/preprocessing/beat_sync.py`
+supports `max`, `energy_weighted` (softmax over per-frame L2 norm, with a
+`temperature`), `multi_stat` (concatenation of `mean`/`max`/`std`, so the audio
+dim widens to `mert_dim * len(stats)`), `first`, and `last`. The model infers
+its audio input dim from the saved array, so the wider `multi_stat` output needs
+no model change. The pooling method, empty-interval policy, temperature, and
+stats are recorded in each track's `metadata.json`.
+
+### Datasets
+
+This experiment set targets the HarmonixSet (bigvgan render) and SALAMI. Both
+ship in non-standard local layouts, so there are dedicated converters.
+
+HarmonixSet — audio at `data/raw/harmonix/harmonixset_bigvgan/tracks/<id>.wav`,
+structure in the corrected JSONL. Convert `msa_info` onset/label pairs into
+`segment_open` JAMS and emit manifests carrying the official train/val/test
+split:
+
+```bash
+python scripts/convert_harmonix_jsonl_to_jams.py
+# -> data/raw/harmonix/jams/<id>.jams
+# -> data/manifests/harmonix_bigvgan.local.jsonl (+ _{train,val,test})
+python scripts/validate_dataset.py \
+  --manifest data/manifests/harmonix_bigvgan.local.jsonl \
+  --namespace segment_open
+```
+
+SALAMI (nested-mp3 dump) — `audio/<id>/audio.mp3` + `jams/<id>.jams`:
+
+```bash
+python scripts/create_salami_manifest.py --layout nested-mp3
+# -> data/manifests/salami.local.jsonl (1359 tracks)
+python scripts/validate_dataset.py \
+  --manifest data/manifests/salami.local.jsonl \
+  --namespace segment_salami_function
+```
+
+### Preprocessing all pooling methods in one pass
+
+The dense MERT frames are identical across pooling methods, so encoding once and
+pooling every method is far cheaper than one full pass per method.
+`scripts/preprocess_audio_multipool.py` does exactly that, taking the per-method
+configs (each supplies its own `output_root` and `pooling` block). Because the
+dataset name is a path component, one `output_root` per method serves both
+datasets:
+
+```bash
+# HarmonixSet: encode once, write all 6 pooling variants (resumable)
+KMP_DUPLICATE_LIB_OK=TRUE python scripts/preprocess_audio_multipool.py \
+  --manifest data/manifests/harmonix_bigvgan.local.jsonl --skip-existing
+
+# SALAMI: same variants, same output roots (dataset subdir keeps them separate)
+KMP_DUPLICATE_LIB_OK=TRUE python scripts/preprocess_audio_multipool.py \
+  --manifest data/manifests/salami.local.jsonl --skip-existing
+```
+
+Outputs land at
+`data/embeddings/audio_pool_<method>/mert/<dataset>/<id>/beat_sync.npy`. To run a
+single method the ordinary way, use its config with `scripts/preprocess_audio.py`
+(e.g. `configs/preprocessing/audio_mert_madmom_pool_multistat.yaml`).
+
+> The pooling configs use the `madmom` beat tracker
+> (`python -m pip install git+https://github.com/CPJKU/madmom.git`). Switch the
+> `beat_tracker` block to `beat_this` if you prefer to avoid the from-source
+> build.
+
+### Text embeddings and training
+
+Text embeddings are pooling-independent (one set per dataset):
+
+```bash
+python scripts/preprocess_text.py \
+  --config configs/preprocessing/text_harmonix.yaml \
+  --manifest data/manifests/harmonix_bigvgan.local.jsonl
+```
+
+One self-attention adapter train config per pooling method differs only in
+`audio_embedding_root` (`configs/train/harmonix_bigvgan_self_attention_pool_*.yaml`).
+Note `configs/train/` is gitignored, so these live untracked:
+
+```bash
+python scripts/train.py \
+  --config configs/train/harmonix_bigvgan_self_attention_pool_multistat.yaml
+```
+
+### Learnable in-model beat pooling (dense path)
+
+Instead of a fixed parameter-free pool, a `SegmentAttentionPool` can learn to
+attend over the dense frames within each beat. Preprocess with dense frames kept
+(`configs/preprocessing/audio_mert_madmom_keep_dense.yaml` saves `dense.npy` /
+`dense_times.npy` alongside a mean `beat_sync.npy`):
+
+```bash
+KMP_DUPLICATE_LIB_OK=TRUE python scripts/preprocess_audio.py \
+  --config configs/preprocessing/audio_mert_madmom_keep_dense.yaml \
+  --manifest data/manifests/harmonix_bigvgan.local.jsonl --skip-existing
+```
+
+Then train with `data.audio_embedding_key: dense` and `model.audio.beat_pool`
+enabled (`configs/train/harmonix_bigvgan_self_attention_beat_pool_attention.yaml`).
+The data loader carries the dense frames and each frame's beat segment id; the
+model pools frames to one vector per beat with a learned query before the audio
+projection. The default beat-sync path is untouched when `beat_pool` is absent.
+

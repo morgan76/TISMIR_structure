@@ -13,6 +13,8 @@ venv/
 data/raw/
 data/embeddings/
 data/manifests/*.local.jsonl
+data/*.zip
+logs/
 outputs/
 checkpoints/
 *.nbc

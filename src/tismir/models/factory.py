@@ -79,7 +79,24 @@ def _build_temporal_text_adapter(model_config: dict[str, Any], audio_dim: int, t
         structure_pair_hidden_dim=_structure_pair_hidden_dim(structure_config, model_dim),
         temperature=float(sim_config.get("temperature", 0.07)),
         normalize=bool(sim_config.get("normalize", True)),
+        beat_pool=_beat_pool_config(audio_config.get("beat_pool")),
     )
+
+
+def _beat_pool_config(value: Any) -> dict[str, Any] | None:
+    if value in (None, False):
+        return None
+    if value is True:
+        value = {}
+    if not isinstance(value, dict):
+        raise TypeError("audio.beat_pool must be a mapping, boolean, or null")
+    if not bool(value.get("enabled", True)):
+        return None
+    return {
+        "enabled": True,
+        "num_heads": int(value.get("num_heads", 1)),
+        "dropout": float(value.get("dropout", 0.0)),
+    }
 
 
 def _named_config_block(

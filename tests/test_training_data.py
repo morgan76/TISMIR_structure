@@ -67,6 +67,91 @@ def test_structure_embedding_dataset_loads_targets(tmp_path):
     assert batch["mask"].all()
 
 
+def test_structure_embedding_dataset_dense_path_loads_frames_and_segments(tmp_path):
+    audio_path = tmp_path / "audio.wav"
+    jams_path = tmp_path / "audio.jams"
+    manifest_path = tmp_path / "manifest.jsonl"
+    _write_silent_wav(audio_path, duration=2.0, sample_rate=8000)
+    _write_jams(jams_path)
+    track = Track(
+        track_id="track",
+        audio_path=audio_path,
+        jams_path=jams_path,
+        dataset="dataset",
+    )
+    save_manifest(manifest_path, [track])
+
+    preprocess_track_audio(
+        track=track,
+        output_root=tmp_path / "audio_embeddings",
+        audio_encoder_name="placeholder",
+        audio_encoder_params={"output_dim": 4, "frame_rate": 4.0},
+        beat_tracker_name="uniform",
+        beat_tracker_params={"beat_period": 0.5},
+        pooling={"method": "mean", "keep_dense": True},
+    )
+    preprocess_dataset_text(
+        tracks=[track],
+        output_root=tmp_path / "text_embeddings",
+        text_encoder_name="placeholder",
+        text_encoder_params={"output_dim": 3},
+    )
+
+    dataset = StructureEmbeddingDataset(
+        manifest=manifest_path,
+        audio_embedding_root=tmp_path / "audio_embeddings",
+        audio_encoder="placeholder",
+        text_embedding_root=tmp_path / "text_embeddings",
+        text_encoder="placeholder",
+        audio_embedding_key="dense",
+    )
+    example = dataset[0]
+
+    # "audio" stays the per-beat mean array so targets/masks/dim stay aligned.
+    assert example.audio.shape == (4, 4)
+    np.testing.assert_array_equal(example.targets, [0, 0, 1, 1])
+    # Dense frames (8 at 4 fps over 2 s) plus their beat segment ids.
+    assert example.frames.shape == (8, 4)
+    # beats at 0.0/0.5/1.0/1.5 -> frame times 0,.25,.5,...,1.75 map to beats:
+    np.testing.assert_array_equal(example.frame_segment_ids, [0, 0, 1, 1, 2, 2, 3, 3])
+
+    batch = collate_training_examples([example])
+    assert tuple(batch["frames"].shape) == (1, 8, 4)
+    assert tuple(batch["frame_segment_ids"].shape) == (1, 8)
+    assert tuple(batch["frame_mask"].shape) == (1, 8)
+    assert batch["frame_mask"].all()
+
+
+def test_collate_pads_dense_frames_across_ragged_examples(tmp_path):
+    import torch
+
+    from tismir.training.data import TrainingExample
+
+    labels = ["a", "b"]
+    text = np.zeros((2, 3), dtype=np.float32)
+
+    def _example(num_beats: int, num_frames: int) -> TrainingExample:
+        return TrainingExample(
+            track_id=f"t{num_frames}",
+            dataset="dataset",
+            audio=np.ones((num_beats, 4), dtype=np.float32),
+            text=text,
+            targets=np.zeros(num_beats, dtype=np.int64),
+            base_targets=np.zeros(num_beats, dtype=np.int64),
+            segment_targets=np.zeros(num_beats, dtype=np.int64),
+            labels=labels,
+            beat_intervals=[(float(i), float(i + 1)) for i in range(num_beats)],
+            frames=np.ones((num_frames, 4), dtype=np.float32),
+            frame_segment_ids=np.zeros(num_frames, dtype=np.int64),
+        )
+
+    batch = collate_training_examples([_example(2, 6), _example(2, 4)])
+    assert tuple(batch["frames"].shape) == (2, 6, 4)
+    # The shorter example's padded frame slots are masked out and use -1 segment ids.
+    assert not bool(batch["frame_mask"][1, 4:].any())
+    assert torch.equal(batch["frame_segment_ids"][1, 4:], torch.full((2,), -1))
+
+
 def test_structure_embedding_dataset_subsamples_fast_beat_grid(tmp_path):
     audio_path = tmp_path / "audio.wav"
     jams_path = tmp_path / "audio.jams"

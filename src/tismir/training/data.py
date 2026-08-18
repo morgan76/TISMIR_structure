@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,11 @@ from tismir.data.annotations import (
 )
 from tismir.data.filters import filter_tracks_by_annotation_content
 from tismir.data.jams import load_processed_structure_sections, unique_labels
+from tismir.data.label_synonyms import (
+    SynonymStore,
+    augmented_label_text,
+    label_augmentation_config,
+)
 from tismir.data.manifest import load_manifest
 from tismir.data.schemas import Track
 from tismir.preprocessing.beat_sync import build_beat_intervals
@@ -35,6 +40,10 @@ class TrainingExample:
     segment_targets: np.ndarray
     labels: list[str]
     beat_intervals: list[tuple[float, float]]
+    # Dense-frame path (audio_embedding_key == "dense"): raw MERT frames plus the
+    # beat segment id of each frame, for the learnable in-model attention pool.
+    frames: np.ndarray | None = None
+    frame_segment_ids: np.ndarray | None = None
 
 
 class StructureEmbeddingDataset:
@@ -54,6 +63,7 @@ class StructureEmbeddingDataset:
         annotation_processing: str | dict[str, Any] | None = None,
         beat_subsampling: bool | dict[str, Any] | None = None,
         track_filter: bool | dict[str, Any] | None = None,
+        label_augmentation: bool | dict[str, Any] | None = None,
     ) -> None:
         if candidate_label_strategy not in {"dataset_labels", "track_labels"}:
             raise ValueError("candidate_label_strategy must be one of: dataset_labels, track_labels")
@@ -68,6 +78,12 @@ class StructureEmbeddingDataset:
         self.annotation_processing = annotation_processing
         self.beat_subsampling = beat_subsampling
         self.track_filter = track_filter
+        self.label_augmentation = label_augmentation_config(label_augmentation)
+        self._synonym_store = (
+            SynonymStore.load(self.label_augmentation["synonyms"])
+            if self.label_augmentation["enabled"]
+            else None
+        )
         self.tracks = filter_tracks_by_annotation_content(
             load_manifest(manifest),
             namespace=self.namespace,
@@ -94,7 +110,7 @@ class StructureEmbeddingDataset:
             index=index,
             track_id=track.track_id,
         )
-        return load_training_example(
+        example = load_training_example(
             track=track,
             audio_embedding_root=self.audio_embedding_root,
             audio_encoder=self.audio_encoder,
@@ -107,6 +123,20 @@ class StructureEmbeddingDataset:
             annotation_processing=annotation_processing,
             beat_subsampling=self.beat_subsampling,
         )
+        if self._synonym_store is not None:
+            example = replace(
+                example,
+                text=augmented_label_text(
+                    labels=example.labels,
+                    text=example.text,
+                    store=self._synonym_store,
+                    tier=self.label_augmentation["tier"],
+                    epoch=self.epoch,
+                    seed=self.label_augmentation["seed"],
+                    probability=self.label_augmentation["probability"],
+                ),
+            )
+        return example
 
 
 def load_training_example(
@@ -127,7 +157,11 @@ def load_training_example(
     audio_dir = Path(audio_embedding_root) / audio_encoder / track.dataset / track.track_id
     text_dir = Path(text_embedding_root) / text_encoder / track.dataset
 
-    audio = np.load(audio_dir / f"{audio_embedding_key}.npy").astype(np.float32, copy=False)
+    # In the dense path, "audio" is still the per-beat array (so targets/masks and
+    # the inferred audio dim stay aligned); the raw frames are loaded separately.
+    dense_path = audio_embedding_key == "dense"
+    audio_key = "beat_sync" if dense_path else audio_embedding_key
+    audio = np.load(audio_dir / f"{audio_key}.npy").astype(np.float32, copy=False)
     beats = np.load(audio_dir / "beats.npy").astype(np.float32, copy=False)
     metadata = _load_json(audio_dir / "metadata.json")
     duration = float(metadata["outputs"]["duration"])
@@ -138,12 +172,21 @@ def load_training_example(
             f"{len(audio)} audio frames vs {len(beat_intervals)} beat intervals"
         )
     beat_subsampling_config = _beat_subsampling_config(beat_subsampling)
+    if dense_path and beat_subsampling_config["enabled"]:
+        raise ValueError("audio_embedding_key='dense' does not support beat_subsampling")
     audio, beat_intervals, beat_subsampling_applied = _apply_beat_subsampling(
         audio=audio,
         beat_intervals=beat_intervals,
         beats=beats,
         config=beat_subsampling_config,
     )
+
+    frames = None
+    frame_segment_ids = None
+    if dense_path:
+        frames = np.load(audio_dir / "dense.npy").astype(np.float32, copy=False)
+        frame_times = np.load(audio_dir / "dense_times.npy").astype(np.float32, copy=False)
+        frame_segment_ids = _frame_segment_ids(frame_times, beat_intervals)
 
     labels_payload = _load_json(text_dir / "labels.json")
     dataset_labels = list(labels_payload["labels"])
@@ -205,7 +248,31 @@ def load_training_example(
         segment_targets=segment_targets,
         labels=labels,
         beat_intervals=beat_intervals,
+        frames=frames,
+        frame_segment_ids=frame_segment_ids,
     )
+
+
+def _frame_segment_ids(
+    frame_times: np.ndarray,
+    beat_intervals: list[tuple[float, float]],
+) -> np.ndarray:
+    """Map each dense frame time to its beat segment id (``-1`` if outside all beats).
+
+    Uses the same ``[start, end)`` membership as ``pool_frames_to_intervals``: the
+    intervals partition ``[beat_0, duration)``, so a frame at ``t`` belongs to the
+    interval whose start is the greatest start ``<= t``.
+    """
+
+    if not beat_intervals:
+        return np.full(len(frame_times), -1, dtype=np.int64)
+    starts = np.asarray([start for start, _ in beat_intervals], dtype=np.float64)
+    final_end = float(beat_intervals[-1][1])
+    times = frame_times.astype(np.float64, copy=False)
+    segment_ids = np.searchsorted(starts, times, side="right") - 1
+    outside = (segment_ids < 0) | (times < starts[0]) | (times >= final_end)
+    segment_ids[outside] = -1
+    return segment_ids.astype(np.int64, copy=False)
 
 
 def _select_candidate_labels(
@@ -264,7 +331,7 @@ def collate_training_examples(examples: list[TrainingExample]) -> dict[str, Any]
         mask[index, :length] = True
 
     text = torch.from_numpy(examples[0].text)
-    return {
+    batch = {
         "track_ids": [example.track_id for example in examples],
         "datasets": [example.dataset for example in examples],
         "audio": audio,
@@ -275,6 +342,27 @@ def collate_training_examples(examples: list[TrainingExample]) -> dict[str, Any]
         "mask": mask,
         "labels": labels,
     }
+
+    if examples[0].frames is not None:
+        if any(example.frames is None for example in examples):
+            raise ValueError("Either all or no examples in a batch may carry dense frames")
+        max_frames = max(len(example.frames) for example in examples)
+        frame_dim = examples[0].frames.shape[1]
+        frames = torch.zeros((len(examples), max_frames, frame_dim), dtype=torch.float32)
+        frame_segment_ids = torch.full((len(examples), max_frames), -1, dtype=torch.long)
+        frame_mask = torch.zeros((len(examples), max_frames), dtype=torch.bool)
+        for index, example in enumerate(examples):
+            num_frames = len(example.frames)
+            frames[index, :num_frames] = torch.from_numpy(example.frames)
+            frame_segment_ids[index, :num_frames] = torch.from_numpy(
+                example.frame_segment_ids.astype(np.int64)
+            )
+            frame_mask[index, :num_frames] = True
+        batch["frames"] = frames
+        batch["frame_segment_ids"] = frame_segment_ids
+        batch["frame_mask"] = frame_mask
+
+    return batch
 
 
 def _base_targets(targets: np.ndarray, labels: list[str], ignore_index: int) -> np.ndarray:

@@ -128,6 +128,7 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
             base_targets = batch["base_targets"].to(device)
             segment_targets = batch["segment_targets"].to(device)
             mask = batch["mask"].to(device)
+            frame_tensors = _batch_frame_tensors(batch, device)
 
             loss, loss_components = _compute_loss(
                 model=model,
@@ -139,6 +140,7 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
                 mask=mask,
                 ignore_index=ignore_index,
                 loss_config=loss_config,
+                **frame_tensors,
             )
             loss_for_backward = loss / _accumulation_group_size(
                 microbatch_index=microbatch_index,
@@ -748,6 +750,9 @@ def _build_validation_dataset(config: dict[str, Any]) -> StructureEmbeddingDatas
         return None
     data_config = dict(config["data"])
     data_config.update(validation_config.get("data", {}))
+    # Label synonym augmentation is a train-time regularizer; validation always
+    # scores against the canonical labels for a stable, comparable metric.
+    data_config["label_augmentation"] = None
     if validation_config.get("manifest") is not None:
         data_config["manifest"] = validation_config["manifest"]
     annotation_processing = data_config.get("annotation_processing")
@@ -786,6 +791,7 @@ def _evaluate_loss(
             base_targets = batch["base_targets"].to(device)
             segment_targets = batch["segment_targets"].to(device)
             mask = batch["mask"].to(device)
+            frame_tensors = _batch_frame_tensors(batch, device)
             loss, components = _compute_loss(
                 model=model,
                 audio=audio,
@@ -796,6 +802,7 @@ def _evaluate_loss(
                 mask=mask,
                 ignore_index=ignore_index,
                 loss_config=loss_config,
+                **frame_tensors,
             )
             total_loss += float(loss.detach().cpu()) * len(examples)
             for name, value in components.items():
@@ -840,15 +847,16 @@ def _evaluate_segmentation(
             example = dataset[index]
             audio = torch.from_numpy(example.audio).unsqueeze(0).to(device)
             text = torch.from_numpy(example.text).to(device)
+            frame_kwargs = _example_frame_tensors(example, device)
             boundary_probabilities = None
             if bool(config["boundary_decoding"]["enabled"]):
                 if not hasattr(model, "extract_features"):
                     raise ValueError("boundary decoding requires a model with extract_features()")
-                features = model.extract_features(audio, text)
+                features = model.extract_features(audio, text, **frame_kwargs)
                 logits = features["logits"][0].detach().cpu().numpy()
                 boundary_probabilities = _boundary_probabilities_from_features(features)
             else:
-                logits = model(audio, text)[0].detach().cpu().numpy()
+                logits = model(audio, text, **frame_kwargs)[0].detach().cpu().numpy()
             decoded_logits = smooth_logits(
                 logits,
                 window=int(config["smoothing_window"]),
@@ -993,6 +1001,40 @@ def _segments_to_arrays(
     return intervals, labels
 
 
+def _example_frame_tensors(example, device) -> dict[str, Any]:
+    """Build single-example dense-frame tensors (batch of 1) for segmentation eval."""
+
+    torch = _require_torch()
+    if example.frames is None:
+        return {}
+    frames = torch.from_numpy(example.frames).unsqueeze(0).to(device)
+    frame_segment_ids = (
+        torch.from_numpy(example.frame_segment_ids.astype(np.int64)).unsqueeze(0).to(device)
+    )
+    frame_mask = torch.ones(frames.shape[:2], dtype=torch.bool, device=device)
+    return {
+        "frames": frames,
+        "frame_segment_ids": frame_segment_ids,
+        "frame_mask": frame_mask,
+    }
+
+
+def _batch_frame_tensors(batch: dict[str, Any], device) -> dict[str, Any]:
+    """Extract dense-frame tensors from a collated batch, moved to ``device``.
+
+    Returns all-``None`` when the batch has no dense frames (the default beat-sync
+    path), so it can always be splatted into ``_compute_loss``.
+    """
+
+    if "frames" not in batch:
+        return {"frames": None, "frame_segment_ids": None, "frame_mask": None}
+    return {
+        "frames": batch["frames"].to(device),
+        "frame_segment_ids": batch["frame_segment_ids"].to(device),
+        "frame_mask": batch["frame_mask"].to(device),
+    }
+
+
 def _compute_loss(
     model,
     audio,
@@ -1003,16 +1045,30 @@ def _compute_loss(
     mask,
     ignore_index: int,
     loss_config: dict[str, Any],
+    frames=None,
+    frame_segment_ids=None,
+    frame_mask=None,
 ):
+    # Only forward frame tensors to models that opt into the dense path; the
+    # baseline models do not accept these kwargs.
+    frame_kwargs = (
+        {}
+        if frames is None
+        else {
+            "frames": frames,
+            "frame_segment_ids": frame_segment_ids,
+            "frame_mask": frame_mask,
+        }
+    )
     needs_features = _has_auxiliary_losses(loss_config)
     if needs_features:
         if not hasattr(model, "extract_features"):
             raise ValueError("Auxiliary contrastive losses require a model with extract_features()")
-        features = model.extract_features(audio, text, audio_mask=mask)
+        features = model.extract_features(audio, text, audio_mask=mask, **frame_kwargs)
         logits = features["logits"]
     else:
         features = None
-        logits = model(audio, text, audio_mask=mask)
+        logits = model(audio, text, audio_mask=mask, **frame_kwargs)
 
     components = {}
     weighted_terms = []
