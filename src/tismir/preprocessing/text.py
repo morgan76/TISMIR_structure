@@ -181,6 +181,8 @@ def _format_prompt(
 ) -> str:
     template = prompt.get("template", "{label}")
     base_label, occurrence_index = _split_occurrence(normalized_label)
+    section_type, section_marker = _split_section_marker(normalized_label)
+    section_marker_text = "" if section_marker is None else str(section_marker).upper()
     values = {
         "label": prompt_label,
         "raw_label": raw_label,
@@ -191,6 +193,11 @@ def _format_prompt(
         "occurrence_description": _occurrence_description(base_label, occurrence_index),
         "occurrence_prompt": _occurrence_prompt(base_label, occurrence_index),
         "description": _label_description(base_label, prompt),
+        "section_type": section_type,
+        "section_marker": section_marker_text,
+        "marker": section_marker_text,
+        "marker_clause": "" if section_marker is None else f"; occurrence marker: {section_marker_text}",
+        "section_description": _label_description(section_type, prompt),
     }
     text = template.format(**values)
     if prompt.get("normalize_whitespace", True):
@@ -208,7 +215,7 @@ def _resolve_prompt_config(prompt: dict[str, Any] | None) -> dict[str, Any]:
     config["mode"] = mode
     config.setdefault("template", PROMPT_MODE_TEMPLATES[mode])
     config.setdefault("normalize_whitespace", True)
-    if mode == "descriptive":
+    if mode in {"compact_occurrence_definition", "descriptive"}:
         config.setdefault("description_preset", "music_structure")
     return config
 
@@ -247,6 +254,16 @@ def _split_occurrence(label: str) -> tuple[str, int | None]:
 
 def _strip_parenthetical(label: str) -> str:
     return re.sub(r"\s*\([^)]*\)\s*$", "", label.strip().lower())
+
+
+def _split_section_marker(label: str) -> tuple[str, str | None]:
+    text = _strip_parenthetical(label)
+    text = re.sub(r"[_\-]+", " ", text)
+    text = " ".join(text.split())
+    match = re.fullmatch(r"(.+?)\s+([a-z]|[0-9]+[a-z]?)", text)
+    if match is None:
+        return text, None
+    return match.group(1), match.group(2)
 
 
 def _occurrence_description(base_label: str, occurrence_index: int | None) -> str:
@@ -321,6 +338,10 @@ def _description_map(prompt: dict[str, Any]) -> dict[str, str]:
 PROMPT_MODE_TEMPLATES = {
     "bare": "{label}",
     "compact": "Music structure label: {label}",
+    "compact_occurrence_definition": (
+        "section type: {section_type}{marker_clause}; "
+        "musical role: {section_description}"
+    ),
     "descriptive": (
         "Music structure label: {label}. Base type: {base_label}. "
         "Occurrence: {occurrence_description}. Meaning: {description}. "
@@ -343,6 +364,7 @@ MUSIC_STRUCTURE_DESCRIPTIONS = {
     "chorus": "the main repeated hook or refrain section of the song.",
     "chorus half": "a shortened chorus section containing only part of the main refrain.",
     "drum roll": "a short drum-led transition or build-up passage.",
+    "ending": "the closing section at the end of the song.",
     "fade in": "an opening section where the song gradually increases from silence.",
     "fade out": "a closing section where the song gradually decreases toward silence.",
     "guitar": "a section featuring guitar material.",
@@ -358,6 +380,7 @@ MUSIC_STRUCTURE_DESCRIPTIONS = {
     "intro": "the opening section before the main body of the song.",
     "intro verse": "an opening section with verse-like material.",
     "main riff": "a section centered on the song's primary repeated instrumental riff.",
+    "nothing": "a silent, empty, or non-musical region.",
     "opening": "an opening passage before the main body of the song.",
     "outro": "the closing section at the end of the song.",
     "post chorus": "a section following the chorus, often extending or resolving the hook.",

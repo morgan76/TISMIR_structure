@@ -14,7 +14,9 @@ from tismir.data.annotations import (
     is_random_annotation_processing,
     validation_annotation_processing_choice,
 )
+from tismir.data.jams import load_processed_structure_sections, sections_to_intervals_labels
 from tismir.decoding.segments import (
+    boundary_peak_decode_segments,
     decode_label_indices,
     merge_frame_labels,
     remove_short_segments,
@@ -54,6 +56,9 @@ def main() -> None:
             "enumerate_all_occurrences",
             "enumerate_base_occurrences",
             "enumerate_consecutive_repeats",
+            "section_ids_ordered",
+            "section_ids_shuffled",
+            "section_ids_corpus",
             "salami_function_merge",
             "salami_function_occurrences",
             "salami_function_projected_lower",
@@ -64,7 +69,12 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--smoothing-windows", nargs="+", type=int, default=[1, 5, 9, 13, 19])
     parser.add_argument("--smoothing-modes", nargs="+", choices=["mean", "median"], default=["mean"])
-    parser.add_argument("--decoders", nargs="+", choices=["argmax", "viterbi"], default=["viterbi"])
+    parser.add_argument(
+        "--decoders",
+        nargs="+",
+        choices=["argmax", "viterbi", "boundary_peak"],
+        default=["viterbi"],
+    )
     parser.add_argument(
         "--transition-penalties",
         nargs="+",
@@ -89,6 +99,20 @@ def main() -> None:
         help="Numerical clipping values for boundary probabilities.",
     )
     parser.add_argument("--min-segment-durations", nargs="+", type=float, default=[0.0])
+    parser.add_argument("--boundary-peak-thresholds", nargs="+", type=float, default=[0.5])
+    parser.add_argument("--boundary-peak-min-distance-beats", nargs="+", type=int, default=[4])
+    parser.add_argument(
+        "--boundary-peak-min-segment-durations",
+        nargs="+",
+        type=float,
+        default=[3.0],
+    )
+    parser.add_argument(
+        "--boundary-peak-label-assignments",
+        nargs="+",
+        choices=["mean_logits", "majority_vote"],
+        default=["mean_logits"],
+    )
     parser.add_argument("--output-json", required=True)
     parser.add_argument("--output-csv", default=None)
     parser.add_argument("--progress", action="store_true")
@@ -114,6 +138,10 @@ def main() -> None:
         boundary_weights=args.boundary_weights,
         boundary_eps_values=args.boundary_eps_values,
         min_segment_durations=args.min_segment_durations,
+        boundary_peak_thresholds=args.boundary_peak_thresholds,
+        boundary_peak_min_distance_beats=args.boundary_peak_min_distance_beats,
+        boundary_peak_min_segment_durations=args.boundary_peak_min_segment_durations,
+        boundary_peak_label_assignments=args.boundary_peak_label_assignments,
         progress=args.progress,
     )
     save_results(args.output_json, results)
@@ -142,6 +170,10 @@ def run_grid_search(
     boundary_weights: list[float],
     boundary_eps_values: list[float],
     min_segment_durations: list[float],
+    boundary_peak_thresholds: list[float],
+    boundary_peak_min_distance_beats: list[int],
+    boundary_peak_min_segment_durations: list[float],
+    boundary_peak_label_assignments: list[str],
     progress: bool,
 ) -> dict[str, Any]:
     try:
@@ -181,31 +213,27 @@ def run_grid_search(
         progress=progress,
         torch=torch,
     )
-    grid = list(
-        itertools.product(
-            smoothing_windows,
-            smoothing_modes,
-            decoders,
-            transition_penalties,
-            boundary_weights,
-            boundary_eps_values,
-            min_segment_durations,
-        )
+    grid = _decoding_grid(
+        smoothing_windows=smoothing_windows,
+        smoothing_modes=smoothing_modes,
+        decoders=decoders,
+        transition_penalties=transition_penalties,
+        boundary_weights=boundary_weights,
+        boundary_eps_values=boundary_eps_values,
+        min_segment_durations=min_segment_durations,
+        boundary_peak_thresholds=boundary_peak_thresholds,
+        boundary_peak_min_distance_beats=boundary_peak_min_distance_beats,
+        boundary_peak_min_segment_durations=boundary_peak_min_segment_durations,
+        boundary_peak_label_assignments=boundary_peak_label_assignments,
     )
     rows: list[dict[str, Any]] = []
     iterator = _progress_iter(grid, enabled=progress, desc="decoding grid")
-    for window, mode, decoder, penalty, boundary_weight, boundary_eps, min_duration in iterator:
+    for setting in iterator:
         rows.append(
             _evaluate_setting(
                 cached=cached,
                 mir_eval=mir_eval,
-                smoothing_window=window,
-                smoothing_mode=mode,
-                decoder=decoder,
-                transition_penalty=penalty,
-                boundary_weight=boundary_weight,
-                boundary_eps=boundary_eps,
-                min_segment_duration=min_duration,
+                **setting,
             )
         )
     rows.sort(key=lambda row: row["F-measure@3.0_mean"], reverse=True)
@@ -216,6 +244,68 @@ def run_grid_search(
         "grid_size": len(rows),
         "results": rows,
     }
+
+
+def _decoding_grid(
+    smoothing_windows: list[int],
+    smoothing_modes: list[str],
+    decoders: list[str],
+    transition_penalties: list[float],
+    boundary_weights: list[float],
+    boundary_eps_values: list[float],
+    min_segment_durations: list[float],
+    boundary_peak_thresholds: list[float],
+    boundary_peak_min_distance_beats: list[int],
+    boundary_peak_min_segment_durations: list[float],
+    boundary_peak_label_assignments: list[str],
+) -> list[dict[str, Any]]:
+    grid: list[dict[str, Any]] = []
+    for window, mode, decoder in itertools.product(smoothing_windows, smoothing_modes, decoders):
+        if decoder == "boundary_peak":
+            for threshold, min_distance, peak_min_duration, label_assignment in itertools.product(
+                boundary_peak_thresholds,
+                boundary_peak_min_distance_beats,
+                boundary_peak_min_segment_durations,
+                boundary_peak_label_assignments,
+            ):
+                grid.append(
+                    {
+                        "smoothing_window": window,
+                        "smoothing_mode": mode,
+                        "decoder": decoder,
+                        "transition_penalty": 0.0,
+                        "boundary_weight": 0.0,
+                        "boundary_eps": 1e-4,
+                        "min_segment_duration": 0.0,
+                        "boundary_peak_threshold": threshold,
+                        "boundary_peak_min_distance_beats": min_distance,
+                        "boundary_peak_min_segment_duration": peak_min_duration,
+                        "boundary_peak_label_assignment": label_assignment,
+                    }
+                )
+            continue
+        for penalty, boundary_weight, boundary_eps, min_duration in itertools.product(
+            transition_penalties,
+            boundary_weights,
+            boundary_eps_values,
+            min_segment_durations,
+        ):
+            grid.append(
+                {
+                    "smoothing_window": window,
+                    "smoothing_mode": mode,
+                    "decoder": decoder,
+                    "transition_penalty": penalty,
+                    "boundary_weight": boundary_weight,
+                    "boundary_eps": boundary_eps,
+                    "min_segment_duration": min_duration,
+                    "boundary_peak_threshold": float("nan"),
+                    "boundary_peak_min_distance_beats": -1,
+                    "boundary_peak_min_segment_duration": float("nan"),
+                    "boundary_peak_label_assignment": "",
+                }
+            )
+    return grid
 
 
 def _dataset_config(
@@ -278,12 +368,13 @@ def _cache_logits(model, dataset, device, ignore_index: int, limit: int | None, 
                     boundary_probabilities = _sigmoid(boundary_logits)
             else:
                 logits = model(audio, text)[0].detach().cpu().numpy().astype(np.float32)
-            reference_segments = _reference_segments_from_targets(
-                intervals=example.beat_intervals,
-                targets=example.targets,
-                labels=example.labels,
-                ignore_index=ignore_index,
+            track = dataset.tracks[index]
+            reference_sections = load_processed_structure_sections(
+                track.jams_path,
+                namespace=dataset.namespace,
+                annotation_processing=dataset.annotation_processing,
             )
+            reference_segments = _sections_to_segments(reference_sections)
             if not reference_segments:
                 continue
             cached.append(
@@ -312,6 +403,10 @@ def _evaluate_setting(
     boundary_weight: float,
     boundary_eps: float,
     min_segment_duration: float,
+    boundary_peak_threshold: float,
+    boundary_peak_min_distance_beats: int,
+    boundary_peak_min_segment_duration: float,
+    boundary_peak_label_assignment: str,
 ) -> dict[str, Any]:
     metric_values = {name: [] for name in METRICS}
     segment_counts = []
@@ -322,24 +417,39 @@ def _evaluate_setting(
             mode=smoothing_mode,
         )
         item_boundary_probabilities = item.get("boundary_probabilities")
-        label_indices = decode_label_indices(
-            decoded_logits,
-            strategy=decoder,
-            transition_penalty=transition_penalty,
-            boundary_probabilities=item_boundary_probabilities,
-            boundary_weight=(
-                boundary_weight
-                if decoder == "viterbi" and item_boundary_probabilities is not None
-                else 0.0
-            ),
-            boundary_eps=boundary_eps,
-        )
-        predicted_labels = [item["labels"][int(label_index)] for label_index in label_indices]
-        predicted_segments = merge_frame_labels(item["beat_intervals"], predicted_labels)
-        predicted_segments = remove_short_segments(
-            predicted_segments,
-            min_duration=min_segment_duration,
-        )
+        if decoder == "boundary_peak":
+            if item_boundary_probabilities is None:
+                continue
+            _, predicted_segments = boundary_peak_decode_segments(
+                decoded_logits,
+                intervals=item["beat_intervals"],
+                labels=item["labels"],
+                boundary_probabilities=item_boundary_probabilities,
+                threshold=boundary_peak_threshold,
+                min_distance_beats=boundary_peak_min_distance_beats,
+                min_segment_duration=boundary_peak_min_segment_duration,
+                label_assignment=boundary_peak_label_assignment,
+                merge_same_label=True,
+            )
+        else:
+            label_indices = decode_label_indices(
+                decoded_logits,
+                strategy=decoder,
+                transition_penalty=transition_penalty,
+                boundary_probabilities=item_boundary_probabilities,
+                boundary_weight=(
+                    boundary_weight
+                    if decoder == "viterbi" and item_boundary_probabilities is not None
+                    else 0.0
+                ),
+                boundary_eps=boundary_eps,
+            )
+            predicted_labels = [item["labels"][int(label_index)] for label_index in label_indices]
+            predicted_segments = merge_frame_labels(item["beat_intervals"], predicted_labels)
+            predicted_segments = remove_short_segments(
+                predicted_segments,
+                min_duration=min_segment_duration,
+            )
         if not predicted_segments:
             continue
         segment_counts.append(len(predicted_segments))
@@ -395,6 +505,10 @@ def _evaluate_setting(
         "boundary_weight": float(boundary_weight),
         "boundary_eps": float(boundary_eps),
         "min_segment_duration": float(min_segment_duration),
+        "boundary_peak_threshold": float(boundary_peak_threshold),
+        "boundary_peak_min_distance_beats": int(boundary_peak_min_distance_beats),
+        "boundary_peak_min_segment_duration": float(boundary_peak_min_segment_duration),
+        "boundary_peak_label_assignment": boundary_peak_label_assignment,
         "num_tracks": max((len(values) for values in metric_values.values()), default=0),
         "predicted_segments_mean": _safe_mean(segment_counts),
         "predicted_segments_std": _safe_std(segment_counts),
@@ -416,32 +530,13 @@ def _sigmoid(values: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-values))
 
 
-def _reference_segments_from_targets(
-    intervals: list[tuple[float, float]],
-    targets: np.ndarray,
-    labels: list[str],
-    ignore_index: int,
-) -> list[tuple[float, float, str]]:
-    segments: list[tuple[float, float, str]] = []
-    current: tuple[float, float, str] | None = None
-    for interval, target in zip(intervals, targets):
-        target_index = int(target)
-        if target_index == ignore_index:
-            if current is not None:
-                segments.append(current)
-                current = None
-            continue
-        start, end = interval
-        label = labels[target_index]
-        if current is not None and current[2] == label and np.isclose(current[1], start):
-            current = (current[0], end, label)
-        else:
-            if current is not None:
-                segments.append(current)
-            current = (start, end, label)
-    if current is not None:
-        segments.append(current)
-    return segments
+def _sections_to_segments(sections: list[Any]) -> list[tuple[float, float, str]]:
+    intervals, labels = sections_to_intervals_labels(sections)
+    return [
+        (float(start), float(end), str(label))
+        for (start, end), label in zip(intervals, labels)
+        if float(end) > float(start)
+    ]
 
 
 def _segments_to_arrays(
@@ -487,7 +582,11 @@ def print_top_results(rows: list[dict[str, Any]], top_k: int = 10) -> None:
             f"penalty={row['transition_penalty']} "
             f"boundary_weight={row['boundary_weight']} "
             f"boundary_eps={row['boundary_eps']} "
-            f"min_dur={row['min_segment_duration']}"
+            f"min_dur={row['min_segment_duration']} "
+            f"peak_thr={row['boundary_peak_threshold']} "
+            f"peak_dist={row['boundary_peak_min_distance_beats']} "
+            f"peak_min_dur={row['boundary_peak_min_segment_duration']} "
+            f"peak_label={row['boundary_peak_label_assignment']}"
         )
 
 

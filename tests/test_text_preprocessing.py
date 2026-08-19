@@ -140,6 +140,35 @@ def test_preprocess_dataset_text_random_annotation_processing_encodes_union(tmp_
     assert labels["labels"] == ["verse", "chorus", "verse 1", "verse 2", "verse 3", "silence"]
 
 
+def test_preprocess_dataset_text_can_use_corpus_section_ids(tmp_path):
+    jams_path = tmp_path / "track.jams"
+    _write_repeated_jams(jams_path)
+    track = Track(
+        track_id="track",
+        audio_path=tmp_path / "track.wav",
+        jams_path=jams_path,
+        dataset="dataset",
+    )
+
+    results = preprocess_dataset_text(
+        tracks=[track],
+        output_root=tmp_path / "text",
+        text_encoder_name="placeholder",
+        text_encoder_params={"output_dim": 4},
+        annotation_processing={
+            "policy": "section_ids_corpus",
+            "section_id_mapping": {
+                "verse": "section D",
+                "chorus": "section A",
+            },
+        },
+    )
+
+    labels = json.loads((Path(results[0].output_dir) / "labels.json").read_text(encoding="utf-8"))
+    assert labels["labels"] == ["section D", "section A", "silence"]
+    assert labels["prompts"] == ["section D", "section A", "silence"]
+
+
 def test_preprocess_dataset_text_can_use_descriptive_music_structure_prompts(tmp_path):
     jams_path = tmp_path / "track.jams"
     _write_numbered_repeated_jams(jams_path)
@@ -252,6 +281,39 @@ def test_preprocess_dataset_text_can_use_occurrence_descriptive_prompt_mode(tmp_
             "Music structure label: chorus. Meaning: the chorus section. "
             "Use this label for frames belonging to the chorus section."
         ),
+    ]
+
+
+def test_preprocess_dataset_text_can_use_compact_occurrence_definition_prompt_mode(tmp_path):
+    jams_path = tmp_path / "track.jams"
+    jam = jams.JAMS()
+    jam.file_metadata.duration = 3.0
+    annotation = jams.Annotation(namespace="segment_open")
+    annotation.append(time=0.0, duration=1.0, value="chorus A")
+    annotation.append(time=1.0, duration=1.0, value="verse 2")
+    annotation.append(time=2.0, duration=1.0, value="pre-chorus")
+    jam.annotations.append(annotation)
+    jam.save(str(jams_path))
+    track = Track(
+        track_id="track",
+        audio_path=tmp_path / "track.wav",
+        jams_path=jams_path,
+        dataset="dataset",
+    )
+
+    results = preprocess_dataset_text(
+        tracks=[track],
+        output_root=tmp_path / "text",
+        text_encoder_name="placeholder",
+        text_encoder_params={"output_dim": 4},
+        prompt={"mode": "compact_occurrence_definition"},
+    )
+
+    labels = json.loads((Path(results[0].output_dir) / "labels.json").read_text(encoding="utf-8"))
+    assert labels["prompts"][:3] == [
+        "section type: chorus; occurrence marker: A; musical role: the main repeated hook or refrain section of the song",
+        "section type: verse; occurrence marker: 2; musical role: a recurring lyrical section, usually distinct from the chorus",
+        "section type: pre chorus; musical role: a build-up section before the chorus",
     ]
 
 

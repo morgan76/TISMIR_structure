@@ -94,6 +94,7 @@ def main() -> None:
                 decoder=str(segmentation_config.get("decoder", "viterbi")),
                 transition_penalty=float(segmentation_config.get("transition_penalty", 8.0)),
                 min_segment_duration=float(segmentation_config.get("min_segment_duration", 0.0)),
+                boundary_peak=segmentation_config.get("boundary_peak"),
             )
 
             print(f"\n== {policy_name}: evaluation ==")
@@ -140,6 +141,22 @@ def main() -> None:
                 annotation_processing=policy,
                 beat_subsampling=data_config.get("beat_subsampling"),
                 track_filter=data_config.get("track_filter"),
+                smoothing_window=int(segmentation_config.get("smoothing_window", 7)),
+                smoothing_mode=str(segmentation_config.get("smoothing_mode", "mean")),
+                decoder=str(segmentation_config.get("decoder", "viterbi")),
+                transition_penalty=float(segmentation_config.get("transition_penalty", 8.0)),
+                boundary_peak=segmentation_config.get("boundary_peak"),
+                boundary_decoding=segmentation_config.get("boundary_decoding"),
+                boundary_weight=(
+                    None
+                    if not isinstance(segmentation_config.get("boundary_decoding"), dict)
+                    else segmentation_config["boundary_decoding"].get("weight")
+                ),
+                boundary_eps=(
+                    None
+                    if not isinstance(segmentation_config.get("boundary_decoding"), dict)
+                    else segmentation_config["boundary_decoding"].get("eps")
+                ),
                 max_plots=args.diagnostic_max_plots,
                 audio_audio_max_frames=args.audio_audio_max_frames,
             )

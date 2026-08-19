@@ -8,6 +8,8 @@ import numpy as np
 
 from tismir.decoding.jams import save_segments_jams
 from tismir.decoding.segments import (
+    boundary_peak_decode_segments,
+    boundary_peak_decoding_config,
     boundary_times_from_intervals,
     decode_label_indices,
     merge_frame_labels,
@@ -40,6 +42,7 @@ def run_baseline_inference(
     min_segment_duration: float = 0.0,
     beat_subsampling: bool | dict[str, Any] | None = None,
     track_filter: bool | dict[str, Any] | None = None,
+    boundary_peak: dict[str, Any] | None = None,
     boundary_decoding: bool | dict[str, Any] | str | None = None,
 ) -> list[dict[str, Any]]:
     """Run baseline inference over a manifest and save predictions."""
@@ -59,6 +62,11 @@ def run_baseline_inference(
     boundary_decoding_config = _boundary_decoding_config(
         boundary_decoding,
         checkpoint_config=config,
+    )
+    boundary_peak_config = boundary_peak_decoding_config(
+        boundary_peak
+        if boundary_peak is not None
+        else config.get("validation", {}).get("segmentation", {}).get("boundary_peak")
     )
 
     dataset = StructureEmbeddingDataset(
@@ -102,24 +110,35 @@ def run_baseline_inference(
                 boundary_probabilities = None
 
         decoded_logits = smooth_logits(logits, window=smoothing_window, mode=smoothing_mode)
-        label_indices = decode_label_indices(
-            decoded_logits,
-            strategy=decoder,
-            transition_penalty=transition_penalty,
-            boundary_probabilities=boundary_probabilities,
-            boundary_weight=(
-                float(boundary_decoding_config["weight"])
-                if bool(boundary_decoding_config["enabled"]) and boundary_probabilities is not None
-                else 0.0
-            ),
-            boundary_eps=float(boundary_decoding_config["eps"]),
-        )
-        frame_labels = [example.labels[int(label_index)] for label_index in label_indices]
-        segments = merge_frame_labels(example.beat_intervals, frame_labels)
-        segments = remove_short_segments(
-            segments,
-            min_duration=min_segment_duration,
-        )
+        if decoder == "boundary_peak":
+            if boundary_probabilities is None:
+                raise ValueError("boundary_peak decoding requires boundary head predictions")
+            label_indices, segments = boundary_peak_decode_segments(
+                decoded_logits,
+                intervals=example.beat_intervals,
+                labels=example.labels,
+                boundary_probabilities=boundary_probabilities,
+                **boundary_peak_config,
+            )
+        else:
+            label_indices = decode_label_indices(
+                decoded_logits,
+                strategy=decoder,
+                transition_penalty=transition_penalty,
+                boundary_probabilities=boundary_probabilities,
+                boundary_weight=(
+                    float(boundary_decoding_config["weight"])
+                    if bool(boundary_decoding_config["enabled"]) and boundary_probabilities is not None
+                    else 0.0
+                ),
+                boundary_eps=float(boundary_decoding_config["eps"]),
+            )
+            frame_labels = [example.labels[int(label_index)] for label_index in label_indices]
+            segments = merge_frame_labels(example.beat_intervals, frame_labels)
+            segments = remove_short_segments(
+                segments,
+                min_duration=min_segment_duration,
+            )
         duration = example.beat_intervals[-1][1] if example.beat_intervals else None
 
         track_dir = output_dir / example.dataset
@@ -148,6 +167,7 @@ def run_baseline_inference(
                 "decoder": decoder,
                 "transition_penalty": transition_penalty,
                 "min_segment_duration": min_segment_duration,
+                "boundary_peak": boundary_peak_config,
                 "beat_subsampling": beat_subsampling,
                 "track_filter": track_filter,
                 "boundary_decoding": boundary_decoding_config,

@@ -1,8 +1,10 @@
 import numpy as np
+import pytest
 
 from tismir.data.annotations import (
     assign_intervals_to_adjusted_timeline,
     assign_intervals_to_grid,
+    build_corpus_section_id_mapping,
     project_lower_sections_to_function_labels,
     process_sections,
 )
@@ -188,6 +190,138 @@ def test_process_sections_enumerates_any_repeated_base_label():
         "instrumental 2",
         "outro",
     ]
+
+
+def test_process_sections_replaces_labels_with_ordered_section_ids():
+    sections = [
+        Section(start=0.0, end=1.0, label="intro"),
+        Section(start=1.0, end=2.0, label="verse"),
+        Section(start=2.0, end=3.0, label="chorus"),
+        Section(start=3.0, end=4.0, label="verse"),
+        Section(start=4.0, end=5.0, label="bridge"),
+        Section(start=5.0, end=6.0, label="chorus"),
+    ]
+
+    processed = process_sections(sections, {"policy": "section_ids_ordered"})
+
+    assert [section.label for section in processed] == [
+        "section A",
+        "section B",
+        "section C",
+        "section B",
+        "section D",
+        "section C",
+    ]
+
+
+def test_process_sections_replaces_labels_with_stable_shuffled_section_ids():
+    sections = [
+        Section(start=0.0, end=1.0, label="intro"),
+        Section(start=1.0, end=2.0, label="verse"),
+        Section(start=2.0, end=3.0, label="chorus"),
+        Section(start=3.0, end=4.0, label="verse"),
+        Section(start=4.0, end=5.0, label="bridge"),
+        Section(start=5.0, end=6.0, label="chorus"),
+    ]
+
+    first = process_sections(
+        sections,
+        {"policy": "section_ids_shuffled", "section_id_seed": 7},
+    )
+    second = process_sections(
+        sections,
+        {"policy": "section_ids_shuffled", "section_id_seed": 7},
+    )
+
+    assert [section.label for section in first] == [section.label for section in second]
+    assert first[1].label == first[3].label
+    assert first[2].label == first[5].label
+    assert first[0].label != "section A"
+
+
+def test_build_corpus_section_id_mapping_is_fixed_and_randomized():
+    labels = ["intro", "verse", "chorus", "verse", "silence", "bridge"]
+
+    first = build_corpus_section_id_mapping(labels, seed=3)
+    second = build_corpus_section_id_mapping(labels, seed=3)
+
+    assert first == second
+    assert list(first) == ["intro", "verse", "chorus", "bridge"]
+    assert set(first.values()) == {"section A", "section B", "section C", "section D"}
+    assert first != {
+        "intro": "section A",
+        "verse": "section B",
+        "chorus": "section C",
+        "bridge": "section D",
+    }
+
+
+def test_process_sections_replaces_labels_with_corpus_section_ids():
+    sections = [
+        Section(start=0.0, end=1.0, label="intro"),
+        Section(start=1.0, end=2.0, label="verse"),
+        Section(start=2.0, end=3.0, label="chorus"),
+        Section(start=3.0, end=4.0, label="verse"),
+        Section(start=4.0, end=5.0, label="silence"),
+    ]
+
+    processed = process_sections(
+        sections,
+        {
+            "policy": "section_ids_corpus",
+            "section_id_mapping": {
+                "intro": "section C",
+                "verse": "section A",
+                "chorus": "section B",
+            },
+        },
+    )
+
+    assert [section.label for section in processed] == [
+        "section C",
+        "section A",
+        "section B",
+        "section A",
+        "silence",
+    ]
+
+
+def test_process_sections_loads_corpus_section_ids_from_json(tmp_path):
+    mapping_path = tmp_path / "mapping.json"
+    mapping_path.write_text(
+        '{"mapping": {"intro": "section B", "verse": "section A"}}',
+        encoding="utf-8",
+    )
+    sections = [
+        Section(start=0.0, end=1.0, label="intro"),
+        Section(start=1.0, end=2.0, label="verse"),
+    ]
+
+    processed = process_sections(
+        sections,
+        {
+            "policy": "section_ids_corpus",
+            "section_id_mapping_path": str(mapping_path),
+        },
+    )
+
+    assert [section.label for section in processed] == ["section B", "section A"]
+
+
+def test_process_sections_rejects_unmapped_corpus_section_id_label():
+    sections = [
+        Section(start=0.0, end=1.0, label="intro"),
+        Section(start=1.0, end=2.0, label="verse"),
+    ]
+
+    with pytest.raises(KeyError, match="verse"):
+        process_sections(
+            sections,
+            {
+                "policy": "section_ids_corpus",
+                "section_id_mapping": {"intro": "section A"},
+            },
+        )
 
 
 def test_process_sections_can_replace_salami_no_function_with_previous_label():

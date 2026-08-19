@@ -39,6 +39,9 @@ def main() -> None:
             "enumerate_all_occurrences",
             "enumerate_base_occurrences",
             "enumerate_consecutive_repeats",
+            "section_ids_ordered",
+            "section_ids_shuffled",
+            "section_ids_corpus",
             "salami_function_merge",
             "salami_function_occurrences",
             "salami_function_projected_lower",
@@ -50,7 +53,7 @@ def main() -> None:
     parser.add_argument("--audio-audio-max-frames", type=int, default=512)
     parser.add_argument("--smoothing-window", type=int, default=None)
     parser.add_argument("--smoothing-mode", choices=["mean", "median"], default=None)
-    parser.add_argument("--decoder", choices=["argmax", "viterbi"], default=None)
+    parser.add_argument("--decoder", choices=["argmax", "viterbi", "boundary_peak"], default=None)
     parser.add_argument("--transition-penalty", type=float, default=None)
     parser.add_argument(
         "--boundary-decoding",

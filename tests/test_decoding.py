@@ -1,6 +1,8 @@
 import numpy as np
 
 from tismir.decoding.segments import (
+    boundary_peak_decode_segments,
+    decode_boundary_peak_indices,
     decode_label_indices,
     merge_frame_labels_with_boundary_scores,
     remove_short_segments,
@@ -82,6 +84,54 @@ def test_viterbi_decode_uses_low_boundary_probability_to_encourage_stays():
     )
 
     np.testing.assert_array_equal(decoded, [0, 0, 0])
+
+
+def test_boundary_peak_decode_assigns_segment_labels_from_mean_logits():
+    logits = np.asarray(
+        [
+            [2.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 3.0],
+            [0.0, 3.0],
+        ]
+    )
+    intervals = [(0.0, 1.0), (1.0, 2.0), (2.0, 3.0), (3.0, 4.0)]
+    probabilities = np.asarray([0.1, 0.9, 0.1])
+
+    decoded, segments = boundary_peak_decode_segments(
+        logits,
+        intervals=intervals,
+        labels=["verse", "chorus"],
+        boundary_probabilities=probabilities,
+        threshold=0.5,
+        min_distance_beats=1,
+        min_segment_duration=0.0,
+        label_assignment="mean_logits",
+    )
+
+    np.testing.assert_array_equal(decoded, [0, 0, 1, 1])
+    assert segments == [(0.0, 1.5, "verse"), (1.5, 4.0, "chorus")]
+
+
+def test_boundary_peak_decode_can_assign_segment_labels_by_majority_vote():
+    logits = np.asarray(
+        [
+            [5.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 1.0],
+        ]
+    )
+    probabilities = np.asarray([0.1, 0.1])
+
+    decoded = decode_boundary_peak_indices(
+        logits,
+        boundary_probabilities=probabilities,
+        threshold=0.5,
+        min_distance_beats=1,
+        label_assignment="majority_vote",
+    )
+
+    np.testing.assert_array_equal(decoded, [1, 1, 1])
 
 
 def test_remove_short_segments_merges_into_neighbor():

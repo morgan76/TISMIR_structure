@@ -14,7 +14,12 @@ if not os.environ.get("LOKY_MAX_CPU_COUNT"):
 
 import numpy as np
 
-from tismir.decoding.segments import decode_label_indices, smooth_logits
+from tismir.decoding.segments import (
+    boundary_peak_decoding_config,
+    decode_boundary_peak_indices,
+    decode_label_indices,
+    smooth_logits,
+)
 from tismir.models import build_model
 from tismir.training.data import StructureEmbeddingDataset
 
@@ -41,6 +46,7 @@ def run_diagnostics(
     smoothing_mode: str | None = None,
     decoder: str | None = None,
     transition_penalty: float | None = None,
+    boundary_peak: dict[str, Any] | None = None,
     boundary_decoding: bool | dict[str, Any] | str | None = None,
     boundary_weight: float | None = None,
     boundary_eps: float | None = None,
@@ -63,6 +69,7 @@ def run_diagnostics(
         smoothing_mode=smoothing_mode,
         decoder=decoder,
         transition_penalty=transition_penalty,
+        boundary_peak=boundary_peak,
         boundary_decoding=boundary_decoding,
         boundary_weight=boundary_weight,
         boundary_eps=boundary_eps,
@@ -120,19 +127,30 @@ def run_diagnostics(
             window=int(decoding_config["smoothing_window"]),
             mode=str(decoding_config["smoothing_mode"]),
         )
-        decoded_predictions = decode_label_indices(
-            decoded_logits,
-            strategy=str(decoding_config["decoder"]),
-            transition_penalty=float(decoding_config["transition_penalty"]),
-            boundary_probabilities=boundary_probabilities,
-            boundary_weight=(
-                float(decoding_config["boundary_decoding"]["weight"])
-                if bool(decoding_config["boundary_decoding"]["enabled"])
-                and boundary_probabilities is not None
-                else 0.0
-            ),
-            boundary_eps=float(decoding_config["boundary_decoding"]["eps"]),
-        ).astype(np.int64)
+        if str(decoding_config["decoder"]) == "boundary_peak":
+            if boundary_probabilities is None:
+                raise ValueError("boundary_peak decoding requires boundary head predictions")
+            decoded_predictions = decode_boundary_peak_indices(
+                decoded_logits,
+                boundary_probabilities=boundary_probabilities,
+                threshold=float(decoding_config["boundary_peak"]["threshold"]),
+                min_distance_beats=int(decoding_config["boundary_peak"]["min_distance_beats"]),
+                label_assignment=str(decoding_config["boundary_peak"]["label_assignment"]),
+            ).astype(np.int64)
+        else:
+            decoded_predictions = decode_label_indices(
+                decoded_logits,
+                strategy=str(decoding_config["decoder"]),
+                transition_penalty=float(decoding_config["transition_penalty"]),
+                boundary_probabilities=boundary_probabilities,
+                boundary_weight=(
+                    float(decoding_config["boundary_decoding"]["weight"])
+                    if bool(decoding_config["boundary_decoding"]["enabled"])
+                    and boundary_probabilities is not None
+                    else 0.0
+                ),
+                boundary_eps=float(decoding_config["boundary_decoding"]["eps"]),
+            ).astype(np.int64)
 
         text_text = _cosine_matrix(text_tokens, text_tokens)
         audio_indices = _sample_indices(len(audio_tokens), max_count=audio_audio_max_frames)
@@ -1000,6 +1018,7 @@ def _diagnostic_decoding_config(
     smoothing_mode: str | None,
     decoder: str | None,
     transition_penalty: float | None,
+    boundary_peak: dict[str, Any] | None,
     boundary_decoding: bool | dict[str, Any] | str | None,
     boundary_weight: float | None,
     boundary_eps: float | None,
@@ -1020,6 +1039,9 @@ def _diagnostic_decoding_config(
         raise ValueError("boundary decoding weight must be non-negative")
     if not 0.0 < boundary_config["eps"] < 0.5:
         raise ValueError("boundary decoding eps must be between 0 and 0.5")
+    decoder_value = str(decoder if decoder is not None else segmentation.get("decoder", "viterbi"))
+    if decoder_value not in {"argmax", "viterbi", "boundary_peak"}:
+        raise ValueError("decoder must be one of: argmax, viterbi, boundary_peak")
     return {
         "smoothing_window": int(
             smoothing_window
@@ -1031,13 +1053,16 @@ def _diagnostic_decoding_config(
             if smoothing_mode is not None
             else segmentation.get("smoothing_mode", "mean")
         ),
-        "decoder": str(decoder if decoder is not None else segmentation.get("decoder", "viterbi")),
+        "decoder": decoder_value,
         "transition_penalty": float(
             transition_penalty
             if transition_penalty is not None
             else segmentation.get("transition_penalty", 0.0)
         ),
         "boundary_decoding": boundary_config,
+        "boundary_peak": boundary_peak_decoding_config(
+            boundary_peak if boundary_peak is not None else segmentation.get("boundary_peak")
+        ),
     }
 
 

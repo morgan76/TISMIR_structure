@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 
@@ -163,6 +164,164 @@ def decode_label_indices(
             boundary_eps=boundary_eps,
         )
     raise ValueError("strategy must be one of: argmax, viterbi")
+
+
+def boundary_peak_decoding_config(value: dict[str, Any] | None) -> dict[str, Any]:
+    """Parse boundary-peak segment decoder options."""
+
+    value = {} if value is None else dict(value)
+    threshold = float(value.get("threshold", 0.5))
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("boundary_peak.threshold must be between 0 and 1")
+    min_distance_beats = int(value.get("min_distance_beats", value.get("min_distance", 4)))
+    if min_distance_beats < 1:
+        raise ValueError("boundary_peak.min_distance_beats must be positive")
+    min_segment_duration = float(value.get("min_segment_duration", 3.0))
+    if min_segment_duration < 0:
+        raise ValueError("boundary_peak.min_segment_duration must be non-negative")
+    label_assignment = str(value.get("label_assignment", "mean_logits"))
+    if label_assignment not in {"mean_logits", "majority_vote"}:
+        raise ValueError(
+            "boundary_peak.label_assignment must be one of: mean_logits, majority_vote"
+        )
+    return {
+        "threshold": threshold,
+        "min_distance_beats": min_distance_beats,
+        "min_segment_duration": min_segment_duration,
+        "label_assignment": label_assignment,
+        "merge_same_label": bool(value.get("merge_same_label", True)),
+    }
+
+
+def boundary_peak_split_indices(
+    boundary_probabilities: Sequence[float] | np.ndarray,
+    num_frames: int,
+    threshold: float = 0.5,
+    min_distance_beats: int = 4,
+) -> list[int]:
+    """Return frame indices where a new segment should start."""
+
+    if num_frames < 0:
+        raise ValueError("num_frames must be non-negative")
+    if num_frames <= 1:
+        return []
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("threshold must be between 0 and 1")
+    if min_distance_beats < 1:
+        raise ValueError("min_distance_beats must be positive")
+    probabilities = np.asarray(boundary_probabilities, dtype=np.float64)
+    if probabilities.shape != (num_frames - 1,):
+        raise ValueError("boundary_probabilities must have shape [time - 1]")
+
+    candidate_mask = _boundary_split_mask(probabilities, threshold=threshold, mode="peaks")
+    candidates = np.flatnonzero(candidate_mask)
+    if len(candidates) == 0:
+        return []
+
+    selected: list[int] = []
+    for index in sorted(candidates, key=lambda item: float(probabilities[item]), reverse=True):
+        split_index = int(index) + 1
+        if all(abs(split_index - previous) >= min_distance_beats for previous in selected):
+            selected.append(split_index)
+    return sorted(selected)
+
+
+def decode_boundary_peak_indices(
+    logits: np.ndarray,
+    boundary_probabilities: Sequence[float] | np.ndarray,
+    threshold: float = 0.5,
+    min_distance_beats: int = 4,
+    label_assignment: str = "mean_logits",
+) -> np.ndarray:
+    """Decode frame labels by peak-picking boundaries and labeling each span."""
+
+    if logits.ndim != 2:
+        raise ValueError("logits must have shape [time, labels]")
+    num_frames = logits.shape[0]
+    if num_frames == 0:
+        return np.asarray([], dtype=int)
+    if label_assignment not in {"mean_logits", "majority_vote"}:
+        raise ValueError("label_assignment must be one of: mean_logits, majority_vote")
+
+    split_indices = boundary_peak_split_indices(
+        boundary_probabilities,
+        num_frames=num_frames,
+        threshold=threshold,
+        min_distance_beats=min_distance_beats,
+    )
+    boundaries = [0, *split_indices, num_frames]
+    frame_argmax = logits.argmax(axis=-1).astype(np.int64)
+    decoded = np.zeros(num_frames, dtype=np.int64)
+    for start, end in zip(boundaries[:-1], boundaries[1:]):
+        if end <= start:
+            continue
+        if label_assignment == "mean_logits":
+            label_index = int(logits[start:end].mean(axis=0).argmax())
+        else:
+            votes = np.bincount(frame_argmax[start:end], minlength=logits.shape[1])
+            label_index = int(votes.argmax())
+        decoded[start:end] = label_index
+    return decoded
+
+
+def boundary_peak_decode_segments(
+    logits: np.ndarray,
+    intervals: Sequence[tuple[float, float]],
+    labels: Sequence[str],
+    boundary_probabilities: Sequence[float] | np.ndarray,
+    threshold: float = 0.5,
+    min_distance_beats: int = 4,
+    min_segment_duration: float = 3.0,
+    label_assignment: str = "mean_logits",
+    merge_same_label: bool = True,
+) -> tuple[np.ndarray, list[tuple[float, float, str]]]:
+    """Peak-pick boundaries, assign labels per span, and return decoded segments."""
+
+    if len(intervals) != logits.shape[0]:
+        raise ValueError("intervals and logits must have the same number of frames")
+    if logits.shape[1] != len(labels):
+        raise ValueError("labels and logits must have the same label dimension")
+    if min_segment_duration < 0:
+        raise ValueError("min_segment_duration must be non-negative")
+    label_indices = decode_boundary_peak_indices(
+        logits,
+        boundary_probabilities=boundary_probabilities,
+        threshold=threshold,
+        min_distance_beats=min_distance_beats,
+        label_assignment=label_assignment,
+    )
+    if len(intervals) == 0:
+        return label_indices, []
+
+    split_indices = boundary_peak_split_indices(
+        boundary_probabilities,
+        num_frames=logits.shape[0],
+        threshold=threshold,
+        min_distance_beats=min_distance_beats,
+    )
+    boundaries = [0, *split_indices, logits.shape[0]]
+    split_times = boundary_times_from_intervals(intervals)
+    segments: list[tuple[float, float, str]] = []
+    for start, end in zip(boundaries[:-1], boundaries[1:]):
+        if end <= start:
+            continue
+        start_time = float(intervals[0][0]) if start == 0 else float(split_times[start - 1])
+        end_time = float(intervals[-1][1]) if end == len(intervals) else float(split_times[end - 1])
+        if end_time <= start_time:
+            continue
+        segments.append((start_time, end_time, labels[int(label_indices[start])]))
+
+    if merge_same_label:
+        segments = merge_frame_labels(
+            [(start, end) for start, end, _ in segments],
+            [label for _, _, label in segments],
+        )
+    segments = remove_short_segments(
+        segments,
+        min_duration=min_segment_duration,
+        merge_same_label_neighbors=merge_same_label,
+    )
+    return label_indices, segments
 
 
 def viterbi_decode(

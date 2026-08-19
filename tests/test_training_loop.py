@@ -8,7 +8,8 @@ from tismir.data.manifest import save_manifest
 from tismir.data.schemas import Track
 from tismir.preprocessing.audio import preprocess_track_audio
 from tismir.preprocessing.text import preprocess_dataset_text
-from tismir.training.loop import _compute_loss, _loss_config, train_projection_baseline
+from tismir.training.data import StructureEmbeddingDataset
+from tismir.training.loop import _compute_loss, _evaluate_segmentation, _loss_config, train_projection_baseline
 
 
 def test_train_projection_baseline_smoke(tmp_path, capsys):
@@ -111,6 +112,9 @@ def test_train_projection_baseline_smoke(tmp_path, capsys):
     assert metrics["epochs_trained"] == 2
     assert metrics["stopped_early"] is False
     assert metrics["gradient_accumulation_steps"] == 2
+    assert metrics["data_loader"]["num_workers"] == 0
+    assert metrics["data_loader"]["persistent_workers"] is False
+    assert metrics["data_loader"]["prefetch_factor"] is None
     assert metrics["history"][0]["optimizer_steps"] == 1.0
     assert metrics["loss_config"]["pairwise_probability"]["weight"] == 0.5
     assert metrics["loss_config"]["pairwise_probability"]["balance"] is True
@@ -282,6 +286,80 @@ def test_boundary_loss_uses_consecutive_segment_targets():
     assert float(loss) < 0.03
 
 
+def test_segmentation_validation_uses_reference_jams_boundaries(tmp_path):
+    audio_path = tmp_path / "audio.wav"
+    jams_path = tmp_path / "audio.jams"
+    manifest_path = tmp_path / "manifest.jsonl"
+    _write_silent_wav(audio_path, duration=2.0, sample_rate=8000)
+    _write_offset_boundary_jams(jams_path)
+    track = Track(
+        track_id="track",
+        audio_path=audio_path,
+        jams_path=jams_path,
+        dataset="dataset",
+    )
+    save_manifest(manifest_path, [track])
+    preprocess_track_audio(
+        track=track,
+        output_root=tmp_path / "audio_embeddings",
+        audio_encoder_name="placeholder",
+        audio_encoder_params={"output_dim": 4, "frame_rate": 4.0},
+        beat_tracker_name="uniform",
+        beat_tracker_params={"beat_period": 1.0},
+        pooling={"method": "mean", "keep_dense": True},
+    )
+    preprocess_dataset_text(
+        tracks=[track],
+        output_root=tmp_path / "text_embeddings",
+        text_encoder_name="placeholder",
+        text_encoder_params={"output_dim": 4},
+    )
+    dataset = StructureEmbeddingDataset(
+        manifest=manifest_path,
+        audio_embedding_root=tmp_path / "audio_embeddings",
+        audio_encoder="placeholder",
+        text_embedding_root=tmp_path / "text_embeddings",
+        text_encoder="placeholder",
+        audio_embedding_key="beat_sync",
+        namespace="segment_open",
+        candidate_label_strategy="track_labels",
+        ignore_index=-100,
+    )
+
+    class BeatGridPerfectModel:
+        def eval(self):
+            return None
+
+        def train(self):
+            return None
+
+        def __call__(self, audio, text):
+            return torch.tensor([[[5.0, 0.0], [0.0, 5.0]]], dtype=torch.float32)
+
+    metrics = _evaluate_segmentation(
+        model=BeatGridPerfectModel(),
+        dataset=dataset,
+        device=torch.device("cpu"),
+        ignore_index=-100,
+        config={
+            "metrics": ("F-measure@0.5", "F-measure@3.0", "Acc"),
+            "limit": None,
+            "smoothing_window": 1,
+            "smoothing_mode": "mean",
+            "decoder": "argmax",
+            "transition_penalty": 0.0,
+            "boundary_decoding": {"enabled": False, "weight": 0.0, "eps": 0.0001},
+            "boundary_peak": {},
+            "min_segment_duration": 0.0,
+            "trim": True,
+        },
+    )
+
+    assert metrics["metrics"]["Acc"] == 1.0
+    assert metrics["metrics"]["F-measure@0.5"] < 1.0
+    assert metrics["metrics"]["F-measure@3.0"] == 1.0
+
+
 def _write_silent_wav(path: Path, duration: float, sample_rate: int) -> None:
     num_frames = int(duration * sample_rate)
     with wave.open(str(path), "wb") as handle:
@@ -297,5 +375,15 @@ def _write_jams(path: Path) -> None:
     annotation = jams.Annotation(namespace="segment_open")
     annotation.append(time=0.0, duration=1.0, value="intro")
     annotation.append(time=1.0, duration=1.0, value="verse")
+    jam.annotations.append(annotation)
+    jam.save(str(path))
+
+
+def _write_offset_boundary_jams(path: Path) -> None:
+    jam = jams.JAMS()
+    jam.file_metadata.duration = 2.0
+    annotation = jams.Annotation(namespace="segment_open")
+    annotation.append(time=0.0, duration=0.4, value="intro")
+    annotation.append(time=0.4, duration=1.6, value="verse")
     jam.annotations.append(annotation)
     jam.save(str(path))

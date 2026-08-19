@@ -9,6 +9,8 @@ from typing import Any
 import numpy as np
 
 from tismir.decoding.segments import (
+    boundary_peak_decode_segments,
+    boundary_peak_decoding_config,
     decode_label_indices,
     merge_frame_labels,
     remove_short_segments,
@@ -18,6 +20,7 @@ from tismir.data.annotations import (
     is_random_annotation_processing,
     validation_annotation_processing_choice,
 )
+from tismir.data.jams import load_processed_structure_sections, sections_to_intervals_labels
 from tismir.losses import (
     audio_audio_supervised_contrastive,
     audio_to_text_infonce,
@@ -31,6 +34,30 @@ from tismir.losses import (
 )
 from tismir.models import build_model
 from tismir.training.data import StructureEmbeddingDataset, collate_training_examples
+
+
+class _EpochIndexSampler:
+    """Yield indices tagged with the epoch so worker datasets see the right policy."""
+
+    def __init__(self, length: int, *, seed: int, shuffle: bool) -> None:
+        self.length = int(length)
+        self.seed = int(seed)
+        self.shuffle = bool(shuffle)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        indices = list(range(self.length))
+        if self.shuffle:
+            rng = random.Random(self.seed + self.epoch * 1_000_003)
+            rng.shuffle(indices)
+        for index in indices:
+            yield (self.epoch, index)
+
+    def __len__(self) -> int:
+        return self.length
 
 
 def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
@@ -86,6 +113,32 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
     gradient_accumulation_steps = int(opt_config.get("gradient_accumulation_steps", 1))
     if gradient_accumulation_steps < 1:
         raise ValueError("optimization.gradient_accumulation_steps must be positive")
+    data_loader_config = _data_loader_config(opt_config, seed=seed)
+    if opt_config.get("model_summary", True):
+        _print_data_loader_summary(data_loader_config)
+    train_sampler = None
+    train_loader = None
+    validation_loss_loader = None
+    if data_loader_config["num_workers"] > 0:
+        train_sampler = _EpochIndexSampler(
+            len(dataset),
+            seed=seed,
+            shuffle=bool(opt_config.get("shuffle", True)),
+        )
+        train_loader = _build_data_loader(
+            torch=torch,
+            dataset=dataset,
+            batch_size=batch_size,
+            data_loader_config=data_loader_config,
+            sampler=train_sampler,
+        )
+        if validation_dataset is not None:
+            validation_loss_loader = _build_data_loader(
+                torch=torch,
+                dataset=validation_dataset,
+                batch_size=batch_size,
+                data_loader_config=data_loader_config,
+            )
     max_epochs = int(opt_config.get("max_epochs", 1))
     ignore_index = int(config.get("data", {}).get("ignore_index", -100))
     loss_config = _loss_config(config.get("loss", {}))
@@ -101,27 +154,40 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
 
     for epoch in range(max_epochs):
         dataset.set_epoch(epoch)
-        indices = list(range(len(dataset)))
-        if opt_config.get("shuffle", True):
-            random.shuffle(indices)
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+            num_microbatches = len(train_loader)
+            train_batches = enumerate(train_loader)
+        else:
+            indices = list(range(len(dataset)))
+            if opt_config.get("shuffle", True):
+                random.shuffle(indices)
+            microbatch_starts = list(range(0, len(indices), batch_size))
+            num_microbatches = len(microbatch_starts)
+            train_batches = enumerate(microbatch_starts)
 
         epoch_loss = 0.0
         epoch_items = 0
         epoch_component_sums: dict[str, float] = {}
         optimizer_steps = 0
         model.train()
-        microbatch_starts = list(range(0, len(indices), batch_size))
         train_iterator = _progress_iter(
-            enumerate(microbatch_starts),
+            train_batches,
             enabled=progress,
-            total=len(microbatch_starts),
+            total=num_microbatches,
             desc=f"epoch {epoch + 1}/{max_epochs} train",
         )
         optimizer.zero_grad(set_to_none=True)
-        for microbatch_index, start in train_iterator:
-            batch_indices = indices[start : start + batch_size]
-            examples = [dataset[index] for index in batch_indices]
-            batch = collate_training_examples(examples)
+        for microbatch_index, payload in train_iterator:
+            if train_loader is not None:
+                batch = payload
+                example_count = len(batch["track_ids"])
+            else:
+                start = payload
+                batch_indices = indices[start : start + batch_size]
+                examples = [dataset[index] for index in batch_indices]
+                batch = collate_training_examples(examples)
+                example_count = len(examples)
             audio = batch["audio"].to(device)
             text = batch["text"].to(device)
             targets = batch["targets"].to(device)
@@ -142,25 +208,26 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
             )
             loss_for_backward = loss / _accumulation_group_size(
                 microbatch_index=microbatch_index,
-                num_microbatches=len(microbatch_starts),
+                num_microbatches=num_microbatches,
                 gradient_accumulation_steps=gradient_accumulation_steps,
             )
             loss_for_backward.backward()
             if _should_step_optimizer(
                 microbatch_index=microbatch_index,
-                num_microbatches=len(microbatch_starts),
+                num_microbatches=num_microbatches,
                 gradient_accumulation_steps=gradient_accumulation_steps,
             ):
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 optimizer_steps += 1
 
-            epoch_loss += float(loss.detach().cpu()) * len(examples)
+            epoch_loss += float(loss.detach().cpu()) * example_count
             for name, value in loss_components.items():
                 epoch_component_sums[name] = (
-                    epoch_component_sums.get(name, 0.0) + float(value.detach().cpu()) * len(examples)
+                    epoch_component_sums.get(name, 0.0)
+                    + float(value.detach().cpu()) * example_count
                 )
-            epoch_items += len(examples)
+            epoch_items += example_count
 
         mean_loss = epoch_loss / max(epoch_items, 1)
         record = {
@@ -181,6 +248,7 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
                 device=device,
                 ignore_index=ignore_index,
                 loss_config=loss_config,
+                data_loader=validation_loss_loader,
                 progress=progress,
                 desc=f"epoch {epoch + 1}/{max_epochs} val-loss",
             )
@@ -306,6 +374,12 @@ def train_projection_baseline(config: dict[str, Any]) -> dict[str, Any]:
         "stop_reason": stop_reason,
         "final_learning_rate": history[-1].get("learning_rate") if history else None,
         "gradient_accumulation_steps": gradient_accumulation_steps,
+        "data_loader": {
+            "num_workers": data_loader_config["num_workers"],
+            "persistent_workers": data_loader_config["persistent_workers"],
+            "prefetch_factor": data_loader_config["prefetch_factor"],
+            "pin_memory": data_loader_config["pin_memory"],
+        },
         "loss_config": loss_config,
         "history": history,
     }
@@ -379,6 +453,9 @@ def _segmentation_validation_config(value: Any, model_config: dict[str, Any] | N
     min_segment_duration = float(segmentation.get("min_segment_duration", 0.0))
     if min_segment_duration < 0:
         raise ValueError("validation.segmentation.min_segment_duration must be non-negative")
+    decoder = str(segmentation.get("decoder", "viterbi"))
+    if decoder not in {"argmax", "viterbi", "boundary_peak"}:
+        raise ValueError("validation.segmentation.decoder must be one of: argmax, viterbi, boundary_peak")
     boundary_decoding = _boundary_decoding_config(
         segmentation.get("boundary_decoding"),
         model_config=model_config,
@@ -406,9 +483,10 @@ def _segmentation_validation_config(value: Any, model_config: dict[str, Any] | N
         "limit": limit,
         "smoothing_window": smoothing_window,
         "smoothing_mode": str(segmentation.get("smoothing_mode", "mean")),
-        "decoder": str(segmentation.get("decoder", "viterbi")),
+        "decoder": decoder,
         "transition_penalty": transition_penalty,
         "boundary_decoding": boundary_decoding,
+        "boundary_peak": boundary_peak_decoding_config(segmentation.get("boundary_peak")),
         "min_segment_duration": min_segment_duration,
         "trim": bool(segmentation.get("trim", True)),
         "checkpoint_name": str(segmentation.get("checkpoint_name", "best_segmentation_checkpoint.pt")),
@@ -759,6 +837,77 @@ def _build_validation_dataset(config: dict[str, Any]) -> StructureEmbeddingDatas
     return StructureEmbeddingDataset(**data_config)
 
 
+def _data_loader_config(opt_config: dict[str, Any], *, seed: int) -> dict[str, Any]:
+    num_workers = int(opt_config.get("num_workers", 0))
+    if num_workers < 0:
+        raise ValueError("optimization.num_workers must be non-negative")
+    persistent_workers = bool(opt_config.get("persistent_workers", num_workers > 0))
+    prefetch_factor = opt_config.get("prefetch_factor", 2 if num_workers > 0 else None)
+    if prefetch_factor is not None:
+        prefetch_factor = int(prefetch_factor)
+        if prefetch_factor < 1:
+            raise ValueError("optimization.prefetch_factor must be positive")
+    return {
+        "num_workers": num_workers,
+        "persistent_workers": persistent_workers and num_workers > 0,
+        "prefetch_factor": prefetch_factor if num_workers > 0 else None,
+        "pin_memory": bool(opt_config.get("pin_memory", False)),
+        "seed": int(opt_config.get("data_loader_seed", seed)),
+    }
+
+
+def _build_data_loader(
+    *,
+    torch,
+    dataset: StructureEmbeddingDataset,
+    batch_size: int,
+    data_loader_config: dict[str, Any],
+    sampler=None,
+):
+    from torch.utils.data import DataLoader
+
+    generator = torch.Generator()
+    generator.manual_seed(int(data_loader_config["seed"]))
+    kwargs: dict[str, Any] = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "collate_fn": collate_training_examples,
+        "num_workers": int(data_loader_config["num_workers"]),
+        "pin_memory": bool(data_loader_config["pin_memory"]),
+        "generator": generator,
+    }
+    if sampler is not None:
+        kwargs["sampler"] = sampler
+    else:
+        kwargs["shuffle"] = False
+    if int(data_loader_config["num_workers"]) > 0:
+        kwargs["persistent_workers"] = bool(data_loader_config["persistent_workers"])
+        kwargs["worker_init_fn"] = _seed_data_loader_worker
+        if data_loader_config["prefetch_factor"] is not None:
+            kwargs["prefetch_factor"] = int(data_loader_config["prefetch_factor"])
+    return DataLoader(**kwargs)
+
+
+def _print_data_loader_summary(config: dict[str, Any]) -> None:
+    if int(config["num_workers"]) <= 0:
+        print("data loader: manual main-process loading (num_workers=0)")
+        return
+    print(
+        "data loader: "
+        f"num_workers={config['num_workers']} "
+        f"persistent_workers={config['persistent_workers']} "
+        f"prefetch_factor={config['prefetch_factor']} "
+        f"pin_memory={config['pin_memory']}"
+    )
+
+
+def _seed_data_loader_worker(worker_id: int) -> None:
+    torch = _require_torch()
+    worker_seed = torch.initial_seed() % (2**32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+
+
 def _evaluate_loss(
     model,
     dataset: StructureEmbeddingDataset,
@@ -766,6 +915,7 @@ def _evaluate_loss(
     device,
     ignore_index: int,
     loss_config: dict[str, Any],
+    data_loader=None,
     progress: bool = False,
     desc: str | None = None,
 ) -> tuple[float, dict[str, float]]:
@@ -774,12 +924,26 @@ def _evaluate_loss(
     total_loss = 0.0
     total_items = 0
     component_sums: dict[str, float] = {}
-    starts = list(range(0, len(dataset), batch_size))
-    iterator = _progress_iter(starts, enabled=progress, total=len(starts), desc=desc)
+    if data_loader is not None:
+        batch_source = data_loader
+        total = len(data_loader)
+    else:
+        starts = list(range(0, len(dataset), batch_size))
+        batch_source = starts
+        total = len(starts)
+    iterator = _progress_iter(batch_source, enabled=progress, total=total, desc=desc)
     with torch.inference_mode():
-        for start in iterator:
-            examples = [dataset[index] for index in range(start, min(start + batch_size, len(dataset)))]
-            batch = collate_training_examples(examples)
+        for payload in iterator:
+            if data_loader is not None:
+                batch = payload
+                example_count = len(batch["track_ids"])
+            else:
+                start = payload
+                examples = [
+                    dataset[index] for index in range(start, min(start + batch_size, len(dataset)))
+                ]
+                batch = collate_training_examples(examples)
+                example_count = len(examples)
             audio = batch["audio"].to(device)
             text = batch["text"].to(device)
             targets = batch["targets"].to(device)
@@ -797,12 +961,12 @@ def _evaluate_loss(
                 ignore_index=ignore_index,
                 loss_config=loss_config,
             )
-            total_loss += float(loss.detach().cpu()) * len(examples)
+            total_loss += float(loss.detach().cpu()) * example_count
             for name, value in components.items():
                 component_sums[name] = (
-                    component_sums.get(name, 0.0) + float(value.detach().cpu()) * len(examples)
+                    component_sums.get(name, 0.0) + float(value.detach().cpu()) * example_count
                 )
-            total_items += len(examples)
+            total_items += example_count
     model.train()
     return (
         total_loss / max(total_items, 1),
@@ -841,7 +1005,11 @@ def _evaluate_segmentation(
             audio = torch.from_numpy(example.audio).unsqueeze(0).to(device)
             text = torch.from_numpy(example.text).to(device)
             boundary_probabilities = None
-            if bool(config["boundary_decoding"]["enabled"]):
+            needs_boundary_probabilities = (
+                bool(config["boundary_decoding"]["enabled"])
+                or str(config["decoder"]) == "boundary_peak"
+            )
+            if needs_boundary_probabilities:
                 if not hasattr(model, "extract_features"):
                     raise ValueError("boundary decoding requires a model with extract_features()")
                 features = model.extract_features(audio, text)
@@ -854,39 +1022,50 @@ def _evaluate_segmentation(
                 window=int(config["smoothing_window"]),
                 mode=str(config["smoothing_mode"]),
             )
-            label_indices = decode_label_indices(
-                decoded_logits,
-                strategy=str(config["decoder"]),
-                transition_penalty=float(config["transition_penalty"]),
-                boundary_probabilities=boundary_probabilities,
-                boundary_weight=(
-                    float(config["boundary_decoding"]["weight"])
-                    if boundary_probabilities is not None
-                    else 0.0
-                ),
-                boundary_eps=float(config["boundary_decoding"]["eps"]),
-            )
+            if str(config["decoder"]) == "boundary_peak":
+                if boundary_probabilities is None:
+                    raise ValueError("boundary_peak decoding requires boundary head predictions")
+                label_indices, predicted_segments = boundary_peak_decode_segments(
+                    decoded_logits,
+                    intervals=example.beat_intervals,
+                    labels=example.labels,
+                    boundary_probabilities=boundary_probabilities,
+                    **config["boundary_peak"],
+                )
+            else:
+                label_indices = decode_label_indices(
+                    decoded_logits,
+                    strategy=str(config["decoder"]),
+                    transition_penalty=float(config["transition_penalty"]),
+                    boundary_probabilities=boundary_probabilities,
+                    boundary_weight=(
+                        float(config["boundary_decoding"]["weight"])
+                        if boundary_probabilities is not None
+                        else 0.0
+                    ),
+                    boundary_eps=float(config["boundary_decoding"]["eps"]),
+                )
+                predicted_labels = [example.labels[int(label_index)] for label_index in label_indices]
+                predicted_segments = merge_frame_labels(example.beat_intervals, predicted_labels)
+                predicted_segments = remove_short_segments(
+                    predicted_segments,
+                    min_duration=float(config["min_segment_duration"]),
+                )
             frame_scores = _frame_label_accuracy_scores(
                 label_indices,
                 targets=example.targets,
                 ignore_index=ignore_index,
             )
-            predicted_labels = [example.labels[int(label_index)] for label_index in label_indices]
-            predicted_segments = merge_frame_labels(example.beat_intervals, predicted_labels)
-            predicted_segments = remove_short_segments(
-                predicted_segments,
-                min_duration=float(config["min_segment_duration"]),
+            track = dataset.tracks[index]
+            reference_sections = load_processed_structure_sections(
+                track.jams_path,
+                namespace=dataset.namespace,
+                annotation_processing=dataset.annotation_processing,
             )
-            reference_segments = _reference_segments_from_targets(
-                intervals=example.beat_intervals,
-                targets=example.targets,
-                labels=example.labels,
-                ignore_index=ignore_index,
-            )
-            if not reference_segments or not predicted_segments:
+            if not reference_sections or not predicted_segments:
                 continue
 
-            ref_intervals, ref_labels = _segments_to_arrays(reference_segments)
+            ref_intervals, ref_labels = sections_to_intervals_labels(reference_sections)
             pred_intervals, pred_labels = _segments_to_arrays(predicted_segments)
             duration = max(float(ref_intervals[-1, 1]), float(pred_intervals[-1, 1]))
             ref_intervals, ref_labels = mir_eval.util.adjust_intervals(
@@ -955,34 +1134,6 @@ def _frame_label_accuracy_scores(
         "Acc": float(np.mean(valid_predictions == valid_targets)),
         "Balanced Acc": float(np.mean(per_label_acc)) if per_label_acc else float("nan"),
     }
-
-
-def _reference_segments_from_targets(
-    intervals: list[tuple[float, float]],
-    targets: np.ndarray,
-    labels: list[str],
-    ignore_index: int,
-) -> list[tuple[float, float, str]]:
-    segments: list[tuple[float, float, str]] = []
-    current: tuple[float, float, str] | None = None
-    for interval, target in zip(intervals, targets):
-        target_index = int(target)
-        if target_index == ignore_index:
-            if current is not None:
-                segments.append(current)
-                current = None
-            continue
-        start, end = interval
-        label = labels[target_index]
-        if current is not None and current[2] == label and np.isclose(current[1], start):
-            current = (current[0], end, label)
-        else:
-            if current is not None:
-                segments.append(current)
-            current = (start, end, label)
-    if current is not None:
-        segments.append(current)
-    return segments
 
 
 def _segments_to_arrays(

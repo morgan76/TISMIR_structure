@@ -86,11 +86,16 @@ class StructureEmbeddingDataset:
 
         self.epoch = int(epoch)
 
-    def __getitem__(self, index: int) -> TrainingExample:
+    def __getitem__(self, index: int | tuple[int, int]) -> TrainingExample:
+        epoch = self.epoch
+        if isinstance(index, tuple):
+            if len(index) != 2:
+                raise IndexError("Dataset tuple indices must be (epoch, index)")
+            epoch, index = int(index[0]), int(index[1])
         track = self.tracks[index]
         annotation_processing = _resolve_annotation_processing_for_example(
             self.annotation_processing,
-            epoch=self.epoch,
+            epoch=epoch,
             index=index,
             track_id=track.track_id,
         )

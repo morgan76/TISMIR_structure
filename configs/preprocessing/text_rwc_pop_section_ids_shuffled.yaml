@@ -1,0 +1,18 @@
+output_root: data/embeddings/text_rwc_pop_section_ids_shuffled
+scope: dataset
+
+text_encoder:
+  name: sentence_transformers
+  checkpoint: intfloat/e5-base-v2
+  device: null
+  normalize_embeddings: true
+  batch_size: 32
+
+prompt:
+  mode: bare
+  normalize_whitespace: true
+
+annotation_processing:
+  policy: section_ids_shuffled
+  section_id_prefix: section
+  section_id_seed: 0

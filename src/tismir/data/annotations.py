@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
+import hashlib
+import json
+from functools import lru_cache
+from pathlib import Path
+import random
 import re
 from typing import Any
 
@@ -16,6 +21,9 @@ ANNOTATION_PROCESSING_POLICIES = {
     "enumerate_all_occurrences",
     "enumerate_base_occurrences",
     "enumerate_consecutive_repeats",
+    "section_ids_ordered",
+    "section_ids_shuffled",
+    "section_ids_corpus",
     "salami_function_merge",
     "salami_function_occurrences",
     "salami_function_projected_lower",
@@ -88,6 +96,29 @@ def process_sections(
             labels_to_enumerate=_consecutively_repeated_labels(sections),
             start_index=config["start_index"],
             separator=config["separator"],
+        )
+    if policy == "section_ids_ordered":
+        return replace_labels_with_section_ids(
+            sections,
+            prefix=config["section_id_prefix"],
+            shuffle=False,
+            seed=config["section_id_seed"],
+            preserve_labels=config["section_id_preserve_labels"],
+        )
+    if policy == "section_ids_shuffled":
+        return replace_labels_with_section_ids(
+            sections,
+            prefix=config["section_id_prefix"],
+            shuffle=True,
+            seed=config["section_id_seed"],
+            preserve_labels=config["section_id_preserve_labels"],
+        )
+    if policy == "section_ids_corpus":
+        return replace_labels_with_corpus_section_ids(
+            sections,
+            mapping=config["section_id_mapping"],
+            preserve_labels=config["section_id_preserve_labels"],
+            unknown_label=config["section_id_unknown_label"],
         )
     raise ValueError(f"Unknown annotation processing policy: {policy}")
 
@@ -165,6 +196,12 @@ def _concrete_annotation_processing_choice(
         "merge_projected_lower",
         "occurrence_skip_labels",
         "annotation_selection",
+        "section_id_prefix",
+        "section_id_seed",
+        "section_id_preserve_labels",
+        "section_id_mapping",
+        "section_id_mapping_path",
+        "section_id_unknown_label",
     ):
         if key in parent and key not in config:
             config[key] = parent[key]
@@ -323,6 +360,76 @@ def enumerate_section_base_occurrences(
     return processed
 
 
+def replace_labels_with_section_ids(
+    sections: Sequence[Section],
+    prefix: str = "section",
+    shuffle: bool = False,
+    seed: int = 0,
+    preserve_labels: Sequence[str] = ("silence",),
+) -> list[Section]:
+    """Replace within-track section names with neutral section identifiers."""
+
+    preserve = {_canonical_label(label) for label in preserve_labels}
+    labels = [
+        label
+        for label in dict.fromkeys(section.label for section in sections)
+        if _canonical_label(label) not in preserve
+    ]
+    section_ids = [_section_id_label(prefix, index) for index in range(len(labels))]
+    if shuffle:
+        rng = random.Random(_section_id_shuffle_seed(seed, sections))
+        rng.shuffle(section_ids)
+    label_map = dict(zip(labels, section_ids))
+    return [
+        replace(section, label=label_map.get(section.label, section.label))
+        for section in sections
+    ]
+
+
+def build_corpus_section_id_mapping(
+    labels: Sequence[str],
+    prefix: str = "section",
+    seed: int = 0,
+    preserve_labels: Sequence[str] = ("silence",),
+) -> dict[str, str]:
+    """Build a fixed random mapping from corpus labels to neutral section IDs."""
+
+    preserve = {_canonical_label(label) for label in preserve_labels}
+    source_labels = [
+        label
+        for label in dict.fromkeys(labels)
+        if _canonical_label(label) not in preserve
+    ]
+    section_ids = [_section_id_label(prefix, index) for index in range(len(source_labels))]
+    rng = random.Random(seed)
+    rng.shuffle(section_ids)
+    return dict(zip(source_labels, section_ids))
+
+
+def replace_labels_with_corpus_section_ids(
+    sections: Sequence[Section],
+    mapping: dict[str, str],
+    preserve_labels: Sequence[str] = ("silence",),
+    unknown_label: str = "error",
+) -> list[Section]:
+    """Replace section labels with a fixed corpus-level anonymous mapping."""
+
+    preserve = {_canonical_label(label) for label in preserve_labels}
+    unknown_label = str(unknown_label).lower()
+    if unknown_label not in {"error", "keep"}:
+        raise ValueError("section_id_unknown_label must be one of: error, keep")
+
+    processed: list[Section] = []
+    for section in sections:
+        if section.label in mapping:
+            processed.append(replace(section, label=mapping[section.label]))
+        elif _canonical_label(section.label) in preserve or unknown_label == "keep":
+            processed.append(section)
+        else:
+            raise KeyError(f"Label '{section.label}' is missing from the corpus section-id mapping")
+    return processed
+
+
 def _annotation_processing_config(value: str | dict[str, Any] | None) -> dict[str, Any]:
     if value in (None, False):
         value = "keep"
@@ -345,6 +452,12 @@ def _annotation_processing_config(value: str | dict[str, Any] | None) -> dict[st
         raise ValueError(
             "annotation_processing.projected_function_policy must be one of: "
             "salami_function_merge, salami_function_occurrences"
+        )
+    section_id_mapping = _section_id_mapping(value)
+    if policy == "section_ids_corpus" and not section_id_mapping:
+        raise ValueError(
+            "section_ids_corpus requires annotation_processing.section_id_mapping "
+            "or annotation_processing.section_id_mapping_path"
         )
     return {
         "policy": policy,
@@ -373,6 +486,11 @@ def _annotation_processing_config(value: str | dict[str, Any] | None) -> dict[st
                 ("silence",) if policy == "salami_function_occurrences" else (),
             )
         ),
+        "section_id_prefix": str(value.get("section_id_prefix", "section")),
+        "section_id_seed": int(value.get("section_id_seed", 0)),
+        "section_id_preserve_labels": tuple(value.get("section_id_preserve_labels", ("silence",))),
+        "section_id_mapping": section_id_mapping,
+        "section_id_unknown_label": str(value.get("section_id_unknown_label", "error")),
     }
 
 
@@ -441,6 +559,63 @@ def _merge_confidence(left: float | None, right: float | None) -> float | None:
 
 def _canonical_label(label: str) -> str:
     return re.sub(r"[\s_\-]+", "_", label.strip().lower())
+
+
+def _section_id_label(prefix: str, index: int) -> str:
+    if index < 0:
+        raise ValueError("section id index must be non-negative")
+    return f"{prefix} {_spreadsheet_column_name(index)}"
+
+
+def _spreadsheet_column_name(index: int) -> str:
+    letters = []
+    value = index
+    while True:
+        value, remainder = divmod(value, 26)
+        letters.append(chr(ord("A") + remainder))
+        if value == 0:
+            break
+        value -= 1
+    return "".join(reversed(letters))
+
+
+def _section_id_shuffle_seed(seed: int, sections: Sequence[Section]) -> int:
+    labels = "\x1f".join(section.label for section in sections)
+    payload = f"{seed}\x1e{labels}".encode("utf-8")
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="big", signed=False)
+
+
+def _section_id_mapping(value: dict[str, Any]) -> dict[str, str]:
+    mapping = value.get("section_id_mapping")
+    mapping_path = value.get("section_id_mapping_path")
+    if mapping is not None and mapping_path is not None:
+        raise ValueError(
+            "Use only one of annotation_processing.section_id_mapping or "
+            "annotation_processing.section_id_mapping_path"
+        )
+    if mapping_path is not None:
+        mapping = _load_section_id_mapping(str(mapping_path))
+    if mapping is None:
+        return {}
+    if not isinstance(mapping, dict):
+        raise TypeError("annotation_processing.section_id_mapping must be a mapping")
+    payload = mapping.get("mapping", mapping)
+    if not isinstance(payload, dict):
+        raise TypeError("annotation_processing.section_id_mapping.mapping must be a mapping")
+    return {str(source): str(target) for source, target in payload.items()}
+
+
+@lru_cache(maxsize=16)
+def _load_section_id_mapping(path: str) -> dict[str, str]:
+    with Path(path).open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise TypeError(f"Section-id mapping file must contain a JSON object: {path}")
+    mapping = payload.get("mapping", payload)
+    if not isinstance(mapping, dict):
+        raise TypeError(f"Section-id mapping file must contain a mapping object: {path}")
+    return {str(source): str(target) for source, target in mapping.items()}
 
 
 def _best_overlapping_section(section: Section, candidates: Sequence[Section]) -> Section | None:

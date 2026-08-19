@@ -1,0 +1,27 @@
+dataset_manifest: data/manifests/example.jsonl
+output_root: data/embeddings/audio_madmom
+
+audio_encoder:
+  name: musicfm
+  # MusicFM is not on PyPI. Clone https://github.com/minzwon/musicfm and set
+  # these to the downloaded MusicFM statistics/checkpoint files.
+  stat_path: /Users/morganbuisson/Documents/GitHub/musicfm/data/msd_stats.json
+  model_path: /Users/morganbuisson/Documents/GitHub/musicfm/data/pretrained_msd.pt
+  layer: 7
+  device: cpu
+  is_flash: false
+  max_seconds: null
+
+beat_tracker:
+  name: madmom
+  estimate_downbeats: true
+  fps: 100
+  min_bpm: 55.0
+  max_bpm: 215.0
+  beats_per_bar: [3, 4]
+
+pooling:
+  method: mean
+  empty: nearest
+  keep_dense: false
+  final_interval: track_duration
