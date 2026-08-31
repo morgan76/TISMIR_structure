@@ -1,0 +1,37 @@
+{
+  "labels": [
+    "chorus",
+    "bridge",
+    "verse",
+    "ending",
+    "nothing",
+    "intro",
+    "post chorus",
+    "pre chorus",
+    "silence"
+  ],
+  "manifests": [
+    "data/manifests/rwc_pop_benchmark_train.local.jsonl",
+    "data/manifests/rwc_pop_benchmark_val.local.jsonl",
+    "data/manifests/rwc_pop_benchmark_test.local.jsonl"
+  ],
+  "mapping": {
+    "bridge": "section B",
+    "chorus": "section E",
+    "ending": "section C",
+    "intro": "section D",
+    "nothing": "section A",
+    "post chorus": "section H",
+    "pre chorus": "section G",
+    "verse": "section F"
+  },
+  "namespace": "segment_open",
+  "prefix": "section",
+  "preserve_labels": [
+    "silence"
+  ],
+  "seed": 0,
+  "source_annotation_processing": {
+    "policy": "base_labels"
+  }
+}

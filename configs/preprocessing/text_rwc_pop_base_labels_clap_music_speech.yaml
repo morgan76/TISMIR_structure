@@ -1,0 +1,16 @@
+output_root: data/embeddings/text_rwc_pop_base_labels_clap_music_speech
+scope: dataset
+
+text_encoder:
+  name: clap
+  checkpoint: laion/larger_clap_music_and_speech
+  device: null
+  normalize_embeddings: true
+  batch_size: 32
+
+prompt:
+  mode: bare
+  normalize_whitespace: true
+
+annotation_processing:
+  policy: base_labels

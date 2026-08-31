@@ -1,0 +1,22 @@
+output_root: data/embeddings/text_harmonix_base_definition
+scope: dataset
+
+text_encoder:
+  name: sentence_transformers
+  checkpoint: intfloat/e5-base-v2
+  device: null
+  normalize_embeddings: true
+  batch_size: 32
+
+prompt:
+  template: "Music structure label: {label}. Meaning: {description}."
+  description_preset: music_structure
+  normalize_whitespace: true
+
+label_normalization:
+  name: harmonix
+  normalize_whitespace: true
+  disambiguate_duplicates: true
+
+annotation_processing:
+  policy: base_labels

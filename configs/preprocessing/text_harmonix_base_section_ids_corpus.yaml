@@ -1,0 +1,25 @@
+output_root: data/embeddings/text_harmonix_base_section_ids_corpus
+scope: dataset
+
+text_encoder:
+  name: sentence_transformers
+  checkpoint: intfloat/e5-base-v2
+  device: null
+  normalize_embeddings: true
+  batch_size: 32
+
+prompt:
+  mode: bare
+  normalize_whitespace: true
+
+label_normalization:
+  name: generic
+  normalize_whitespace: true
+
+annotation_processing:
+  policy: section_ids_corpus
+  source_annotation_processing:
+    policy: base_labels
+  section_id_mapping_path: configs/annotation_mappings/harmonix_section_ids_corpus_base_labels_seed0.json
+  section_id_preserve_labels:
+    - silence

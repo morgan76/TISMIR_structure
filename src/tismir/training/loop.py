@@ -723,12 +723,22 @@ def _architecture_summary_lines(model) -> list[str]:
         update_frame_layers = None
         if update_count:
             first_block = update_blocks[0]
+            relation_enabled = bool(
+                getattr(first_block, "relation_attention_enabled", False)
+            )
             update_section_layers = _transformer_layer_count(
                 getattr(first_block, "section_branch", None)
             )
             update_frame_layers = _transformer_layer_count(
                 getattr(first_block, "frame_branch", None)
             )
+        else:
+            relation_enabled = False
+        audio_update = (
+            "relation-aware audio update"
+            if relation_enabled
+            else "audio self-attention update"
+        )
         lines.extend(
             [
                 "    bidirectional section-conditioned audio model",
@@ -736,11 +746,16 @@ def _architecture_summary_lines(model) -> list[str]:
                 f"    text adapter self-attention layers: {text_adapter_layers}",
                 "    init: sections <- audio",
                 f"    update blocks: {update_count}",
-                "    update order: audio <- sections, link-aware audio update, sections <- audio, section self-attention",
-                "    link input channels: frame-label probability similarity and audio cosine",
+                f"    update order: audio <- sections, {audio_update}, sections <- audio, section self-attention",
                 "    output: frame-label similarity from final audio and section tokens",
             ]
         )
+        if relation_enabled and update_count:
+            pair_features = getattr(first_block.frame_branch, "pair_features", ())
+            lines.append(
+                "    link input channels: "
+                + ", ".join(str(feature) for feature in pair_features)
+            )
         if update_section_layers is not None:
             lines.append(
                 "    section self-attention layers per update block: "

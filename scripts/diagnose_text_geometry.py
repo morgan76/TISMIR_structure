@@ -13,6 +13,7 @@ from typing import Callable
 
 import numpy as np
 
+from tismir.data.annotations import label_base
 from tismir.data.jams import load_processed_structure_sections, unique_labels
 from tismir.data.manifest import load_manifest
 from tismir.encoders.text import text_encoders
@@ -54,7 +55,22 @@ def main() -> None:
     parser.add_argument("--checkpoint", default="intfloat/e5-base-v2")
     parser.add_argument("--device", default=None)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--prompt-prefix",
+        default="",
+        help="Optional string prepended to every text prompt before encoding.",
+    )
     parser.add_argument("--annotation-policy", default=None)
+    parser.add_argument(
+        "--condition-set",
+        choices=["prompting", "root_real_vs_corpus_ids"],
+        default="prompting",
+    )
+    parser.add_argument(
+        "--section-id-mapping",
+        default="configs/annotation_mappings/rwc_pop_section_ids_corpus_base_labels_seed0.json",
+        help="Corpus section-ID mapping JSON used by --condition-set root_real_vs_corpus_ids.",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -68,7 +84,10 @@ def main() -> None:
         namespace=args.namespace,
         annotation_processing=annotation_processing,
     )
-    conditions = _default_conditions()
+    conditions = _conditions(
+        condition_set=args.condition_set,
+        section_id_mapping_path=Path(args.section_id_mapping),
+    )
     encoder = text_encoders.build(
         args.text_encoder,
         checkpoint=args.checkpoint,
@@ -82,6 +101,8 @@ def main() -> None:
     entries_by_condition: dict[str, list[LabelEntry]] = {}
     for condition in conditions:
         entries = condition.builder(raw_labels)
+        if args.prompt_prefix:
+            entries = _with_prompt_prefix(entries, args.prompt_prefix)
         prompts = [entry.prompt for entry in entries]
         embeddings = encoder.encode(prompts)
         embeddings = _l2_normalize(embeddings)
@@ -146,7 +167,68 @@ def _collect_labels(
     return labels, counts
 
 
-def _default_conditions() -> list[Condition]:
+def _conditions(condition_set: str, section_id_mapping_path: Path) -> list[Condition]:
+    if condition_set == "prompting":
+        return _prompting_conditions()
+    if condition_set == "root_real_vs_corpus_ids":
+        mapping = _load_section_id_mapping(section_id_mapping_path)
+        return [
+            Condition(
+                name="root_real",
+                description="Root section labels encoded directly.",
+                builder=lambda labels: _entries_from_labels(
+                    labels,
+                    label_transform=label_base,
+                    key_transform=label_base,
+                    prompt_builder=_bare_prompt,
+                ),
+            ),
+            Condition(
+                name="root_real_definition",
+                description="Root section labels phrased with an explicit musical definition.",
+                builder=lambda labels: _entries_from_labels(
+                    labels,
+                    label_transform=label_base,
+                    key_transform=label_base,
+                    prompt_builder=_base_definition_prompt,
+                ),
+            ),
+            Condition(
+                name="root_real_compact_definition",
+                description="Root section labels phrased as compact section type and musical role.",
+                builder=lambda labels: _entries_from_labels(
+                    labels,
+                    label_transform=label_base,
+                    key_transform=label_base,
+                    prompt_builder=_compact_definition_prompt,
+                ),
+            ),
+            Condition(
+                name="root_real_music_caption",
+                description=(
+                    "Root section labels phrased as short music-caption-style "
+                    "descriptions."
+                ),
+                builder=lambda labels: _entries_from_labels(
+                    labels,
+                    label_transform=label_base,
+                    key_transform=label_base,
+                    prompt_builder=_music_caption_prompt,
+                ),
+            ),
+            Condition(
+                name="root_corpus_ids",
+                description=(
+                    "Root section labels replaced by a fixed corpus-level anonymous "
+                    "section-ID codebook."
+                ),
+                builder=lambda labels: _entries_from_corpus_section_ids(labels, mapping),
+            ),
+        ]
+    raise ValueError(f"Unknown condition set: {condition_set}")
+
+
+def _prompting_conditions() -> list[Condition]:
     return [
         Condition(
             name="original_bare",
@@ -207,6 +289,14 @@ def _default_conditions() -> list[Condition]:
     ]
 
 
+def _load_section_id_mapping(path: Path) -> dict[str, str]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    mapping = payload.get("mapping", payload)
+    if not isinstance(mapping, dict):
+        raise ValueError(f"Invalid section-ID mapping payload: {path}")
+    return {str(key): str(value) for key, value in mapping.items()}
+
+
 def _entries_from_labels(
     labels: list[str],
     label_transform: Callable[[str], str] | None = None,
@@ -240,6 +330,47 @@ def _entries_from_labels(
     return entries
 
 
+def _with_prompt_prefix(entries: list[LabelEntry], prefix: str) -> list[LabelEntry]:
+    return [
+        LabelEntry(
+            key=entry.key,
+            label=entry.label,
+            base=entry.base,
+            prompt=f"{prefix}{entry.prompt}",
+            source_labels=entry.source_labels,
+        )
+        for entry in entries
+    ]
+
+
+def _entries_from_corpus_section_ids(
+    labels: list[str],
+    mapping: dict[str, str],
+) -> list[LabelEntry]:
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    for raw_label in labels:
+        root = label_base(raw_label)
+        if root not in groups:
+            groups[root] = []
+            order.append(root)
+        groups[root].append(raw_label)
+
+    entries = []
+    for root in order:
+        label = mapping.get(root, root)
+        entries.append(
+            LabelEntry(
+                key=root,
+                label=label,
+                base=root,
+                prompt=_bare_prompt(label),
+                source_labels=tuple(groups[root]),
+            )
+        )
+    return entries
+
+
 def _bare_prompt(label: str) -> str:
     return label
 
@@ -262,6 +393,11 @@ def _base_definition_prompt(label: str) -> str:
 def _compact_definition_prompt(label: str) -> str:
     base, _ = _split_base_marker(label)
     return f"section type: {base}; musical role: {_definition(base)}"
+
+
+def _music_caption_prompt(label: str) -> str:
+    base, _ = _split_base_marker(label)
+    return f"a {base} section in a pop song, {_definition(base)}"
 
 
 def _occurrence_definition_prompt(label: str) -> str:

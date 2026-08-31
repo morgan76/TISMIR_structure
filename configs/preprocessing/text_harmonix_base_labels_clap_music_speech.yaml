@@ -1,0 +1,21 @@
+output_root: data/embeddings/text_harmonix_base_labels_clap_music_speech
+scope: dataset
+
+text_encoder:
+  name: clap
+  checkpoint: laion/larger_clap_music_and_speech
+  device: null
+  normalize_embeddings: true
+  batch_size: 32
+
+prompt:
+  mode: bare
+  normalize_whitespace: true
+
+label_normalization:
+  name: harmonix
+  normalize_whitespace: true
+  disambiguate_duplicates: true
+
+annotation_processing:
+  policy: base_labels

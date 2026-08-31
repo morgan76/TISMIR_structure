@@ -52,6 +52,8 @@ def process_sections(
             label=config["no_function_label"],
             skip_labels=config["no_function_skip_labels"],
         )
+    if config["source_annotation_processing"] is not None:
+        sections = process_sections(sections, config["source_annotation_processing"])
     if policy == "salami_function_merge":
         return merge_consecutive_same_label_sections(sections)
     if policy == "salami_function_occurrences":
@@ -480,6 +482,10 @@ def _annotation_processing_config(value: str | dict[str, Any] | None) -> dict[st
         "projected_preserve_labels": tuple(value.get("projected_preserve_labels", ("silence",))),
         "projected_function_policy": projected_function_policy,
         "merge_projected_lower": bool(value.get("merge_projected_lower", True)),
+        "source_annotation_processing": value.get(
+            "source_annotation_processing",
+            value.get("source_processing"),
+        ),
         "occurrence_skip_labels": tuple(
             value.get(
                 "occurrence_skip_labels",
@@ -546,7 +552,8 @@ def label_base(label: str) -> str:
     text = re.sub(r"(?<=[a-z])(?=\d)", " ", text)
     text = re.sub(r"(?<=\d)(?=[a-z])", " ", text)
     text = " ".join(text.split())
-    return re.sub(r"\s+[0-9]+(?:\s*[a-z])?$", "", text)
+    text = re.sub(r"\s+[0-9]+(?:\s*[a-z])?$", "", text)
+    return re.sub(r"\s+[a-z]$", "", text)
 
 
 def _merge_confidence(left: float | None, right: float | None) -> float | None:

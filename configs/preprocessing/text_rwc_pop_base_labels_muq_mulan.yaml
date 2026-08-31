@@ -1,0 +1,16 @@
+output_root: data/embeddings/text_rwc_pop_base_labels_muq_mulan
+scope: dataset
+
+text_encoder:
+  name: muq_mulan
+  checkpoint: OpenMuQ/MuQ-MuLan-large
+  device: null
+  normalize_embeddings: true
+  batch_size: 16
+
+prompt:
+  mode: bare
+  normalize_whitespace: true
+
+annotation_processing:
+  policy: base_labels

@@ -214,6 +214,32 @@ def test_process_sections_replaces_labels_with_ordered_section_ids():
     ]
 
 
+def test_process_sections_can_anonymize_after_source_base_labels():
+    sections = [
+        Section(start=0.0, end=1.0, label="Intro A"),
+        Section(start=1.0, end=2.0, label="Verse A"),
+        Section(start=2.0, end=3.0, label="Chorus A"),
+        Section(start=3.0, end=4.0, label="Verse B"),
+        Section(start=4.0, end=5.0, label="Chorus B"),
+    ]
+
+    processed = process_sections(
+        sections,
+        {
+            "policy": "section_ids_ordered",
+            "source_annotation_processing": {"policy": "base_labels"},
+        },
+    )
+
+    assert [section.label for section in processed] == [
+        "section A",
+        "section B",
+        "section C",
+        "section B",
+        "section C",
+    ]
+
+
 def test_process_sections_replaces_labels_with_stable_shuffled_section_ids():
     sections = [
         Section(start=0.0, end=1.0, label="intro"),
@@ -306,6 +332,31 @@ def test_process_sections_loads_corpus_section_ids_from_json(tmp_path):
     )
 
     assert [section.label for section in processed] == ["section B", "section A"]
+
+
+def test_process_sections_can_apply_corpus_ids_after_source_base_labels():
+    sections = [
+        Section(start=0.0, end=1.0, label="intro A"),
+        Section(start=1.0, end=2.0, label="chorus A"),
+        Section(start=2.0, end=3.0, label="chorus B"),
+    ]
+
+    processed = process_sections(
+        sections,
+        {
+            "policy": "section_ids_corpus",
+            "source_annotation_processing": {"policy": "base_labels"},
+            "section_id_mapping": {
+                "intro": "section B",
+                "chorus": "section A",
+            },
+        },
+    )
+
+    assert [section.label for section in processed] == [
+        "section B",
+        "section A",
+    ]
 
 
 def test_process_sections_rejects_unmapped_corpus_section_id_label():

@@ -44,6 +44,7 @@ def run_baseline_inference(
     track_filter: bool | dict[str, Any] | None = None,
     boundary_peak: dict[str, Any] | None = None,
     boundary_decoding: bool | dict[str, Any] | str | None = None,
+    use_checkpoint_annotation_processing: bool = True,
 ) -> list[dict[str, Any]]:
     """Run baseline inference over a manifest and save predictions."""
 
@@ -53,7 +54,7 @@ def run_baseline_inference(
     device_obj = _resolve_device(device, torch)
     checkpoint = torch.load(checkpoint_path, map_location=device_obj)
     config = checkpoint["config"]
-    if annotation_processing is None:
+    if annotation_processing is None and use_checkpoint_annotation_processing:
         annotation_processing = config.get("data", {}).get("annotation_processing")
     if beat_subsampling is None:
         beat_subsampling = config.get("data", {}).get("beat_subsampling")
